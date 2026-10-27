@@ -298,11 +298,13 @@ from silently replacing the verified version.
 
 ### Local Image Evidence
 
-New fixed JSON versions record a SHA-512 fingerprint for each `<img>` whose
-`src` is a local file under the WordPress uploads directory. The fixed body
-removes `srcset` and `sizes`, then replaces each local image URL with a public,
-versioned plugin URL. This prevents a browser from silently selecting a
-different responsive variant or a later replacement of the upload.
+For each local WordPress image, the fixed version records its SHA-512
+fingerprint and replaces the displayed image URL with a version-specific
+verification route. The image is not copied. When a reader opens the page,
+that route checks the current upload before serving it and refuses to display
+it if its bytes have changed. The fixed version also removes responsive-image
+attributes (`srcset` and `sizes`) so the browser cannot silently choose a
+different image variant.
 
 At the independent verifier, a reader can select **Also check declared local
 images in this browser**. The reader's browser downloads each declared image

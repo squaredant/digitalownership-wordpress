@@ -4,7 +4,7 @@ Tags: provenance, publishing, verification, blockchain, content integrity
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.0
-Stable tag: 0.7.3
+Stable tag: 0.7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -45,6 +45,9 @@ DigitalOwnership's [Terms of Service](https://digitalownership.squaredant.com/te
 Only publicly published, non-password-protected posts and pages can create or serve publication evidence. Moving a post to draft, private, or trash removes its public fixed-content and evidence files and disables their public URLs. Exact bytes are retained in a private WordPress archive that only administrators can download. If the post later becomes public again, create and register a new fixed version; archived or withdrawn evidence cannot be selected or republished as a public historical version. Permanent deletion removes that archive too.
 
 == Changelog ==
+
+= 0.7.4 =
+* Refresh the publication evidence panel reliably after a successful manual Gutenberg save so changed content is flagged without a browser refresh.
 
 = 0.7.3 =
 * Document the activation-time evidence metadata cleanup query for Plugin Check.

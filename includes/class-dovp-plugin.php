@@ -589,11 +589,10 @@ final class DOVP_Plugin {
         wp_enqueue_script('wp-data');
         $script = <<<'JS'
 (function () {
-    if (!window.wp || !window.wp.data || !window.wp.domReady) return;
+    if (!window.wp || !window.wp.data) return;
 
-    window.wp.domReady(function () {
-        var wasSaving = false;
-        var wasAutosaving = false;
+    function bindEvidenceRefresh() {
+        var manualSaveInProgress = false;
         var refreshInProgress = false;
 
         function refreshEvidenceBox() {
@@ -628,13 +627,26 @@ final class DOVP_Plugin {
             var isAutosaving = 'function' === typeof editor.isAutosavingPost' && editor.isAutosavingPost();
             var succeeded = 'function' === typeof editor.didPostSaveRequestSucceed' && editor.didPostSaveRequestSucceed();
 
-            if (wasSaving && !wasAutosaving && !isSaving && !isAutosaving && succeeded) {
-                refreshEvidenceBox();
+            if (isSaving && !isAutosaving) {
+                manualSaveInProgress = true;
             }
-            wasSaving = isSaving;
-            wasAutosaving = isAutosaving;
+            if (manualSaveInProgress && !isSaving) {
+                manualSaveInProgress = false;
+                if (succeeded) {
+                    // Let WordPress finish persisting post metadata before
+                    // requesting the server-rendered evidence panel.
+                    window.setTimeout(refreshEvidenceBox, 150);
+                }
+            }
         });
-    });
+
+    }
+
+    if ('loading' === document.readyState) {
+        document.addEventListener('DOMContentLoaded', bindEvidenceRefresh);
+    } else {
+        bindEvidenceRefresh();
+    }
 }());
 JS;
         wp_add_inline_script('wp-data', $script, 'after');

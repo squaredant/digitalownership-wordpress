@@ -594,6 +594,12 @@ final class DOVP_Plugin {
     function bindEvidenceRefresh() {
         var manualSaveInProgress = false;
         var refreshInProgress = false;
+        var lastSavedModified = '';
+
+        function savedModified(editor) {
+            if (!editor || 'function' !== typeof editor.getCurrentPostAttribute) return '';
+            return String(editor.getCurrentPostAttribute('modified') || '');
+        }
 
         function refreshEvidenceBox() {
             if (refreshInProgress) return;
@@ -625,18 +631,26 @@ final class DOVP_Plugin {
 
             var isSaving = editor.isSavingPost();
             var isAutosaving = 'function' === typeof editor.isAutosavingPost' && editor.isAutosavingPost();
-            var succeeded = 'function' === typeof editor.didPostSaveRequestSucceed' && editor.didPostSaveRequestSucceed();
+            var currentModified = savedModified(editor);
+
+            // Gutenberg replaces the saved post record after a REST save. This
+            // detects the confirmed server timestamp even where the optional
+            // didPostSaveRequestSucceed selector is unavailable or stale.
+            if (currentModified && lastSavedModified && currentModified !== lastSavedModified) {
+                lastSavedModified = currentModified;
+                window.setTimeout(refreshEvidenceBox, 150);
+            } else if (currentModified) {
+                lastSavedModified = currentModified;
+            }
 
             if (isSaving && !isAutosaving) {
                 manualSaveInProgress = true;
             }
             if (manualSaveInProgress && !isSaving) {
                 manualSaveInProgress = false;
-                if (succeeded) {
-                    // Let WordPress finish persisting post metadata before
-                    // requesting the server-rendered evidence panel.
-                    window.setTimeout(refreshEvidenceBox, 150);
-                }
+                // A failed save only reloads the existing panel, while a
+                // confirmed save updates the post timestamp check above.
+                window.setTimeout(refreshEvidenceBox, 150);
             }
         });
 

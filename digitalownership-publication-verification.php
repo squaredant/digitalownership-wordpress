@@ -3,7 +3,7 @@
  * Plugin Name: DigitalOwnership Publication Verification
  * Plugin URI: https://digitalownership.squaredant.com/
  * Description: Creates fixed, verifiable versions of WordPress posts and pages.
- * Version: 0.7.4
+ * Version: 0.7.5
  * Requires at least: 6.4
  * Requires PHP: 8.0
  * Author: SquaredAnt GmbH
@@ -29,7 +29,7 @@ defined('ABSPATH') || exit;
  * more details.
  */
 
-define('DOVP_VERSION', '0.7.4');
+define('DOVP_VERSION', '0.7.5');
 define('DOVP_FILE', __FILE__);
 define('DOVP_DIR', plugin_dir_path(__FILE__));
 define('DOVP_URL', plugin_dir_url(__FILE__));

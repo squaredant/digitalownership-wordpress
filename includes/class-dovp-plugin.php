@@ -60,6 +60,7 @@ final class DOVP_Plugin {
         add_action('admin_menu', array($this, 'add_admin_pages'));
         add_action('admin_init', array($this, 'register_settings'));
         add_action('admin_init', array($this, 'add_privacy_policy_content'));
+        add_action('rest_api_init', array($this, 'register_editor_status_route'));
         add_action('admin_footer-post.php', array($this, 'render_action_form'));
         add_action('admin_footer-post-new.php', array($this, 'render_action_form'));
         add_action('enqueue_block_editor_assets', array($this, 'refresh_evidence_box_after_editor_save'));
@@ -379,6 +380,44 @@ final class DOVP_Plugin {
         }
     }
 
+    public function register_editor_status_route() {
+        register_rest_route('digitalownership-publication/v1', '/editor-status/(?P<id>\d+)', array(
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => array($this, 'editor_status'),
+            'permission_callback' => array($this, 'can_read_editor_status'),
+            'args' => array(
+                'id' => array(
+                    'validate_callback' => static function ($value) {
+                        return is_numeric($value) && absint($value) > 0;
+                    },
+                ),
+            ),
+        ));
+    }
+
+    public function can_read_editor_status($request) {
+        $post = get_post(absint($request['id']));
+        return $post
+            && in_array($post->post_type, array('post', 'page'), true)
+            && current_user_can('edit_post', $post->ID);
+    }
+
+    public function editor_status($request) {
+        $post = get_post(absint($request['id']));
+        if (!$post) {
+            return new WP_Error('dovp_post_not_found', __('Publication not found.', 'digitalownership-publication-verification'), array('status' => 404));
+        }
+
+        ob_start();
+        $this->render_meta_box($post);
+        $html = (string) ob_get_clean();
+
+        return rest_ensure_response(array(
+            'html' => $html,
+            'state' => hash('sha256', $html),
+        ));
+    }
+
     public function render_meta_box($post) {
         $enabled = '1' === get_post_meta($post->ID, self::META_ENABLED, true);
         $is_public = $this->is_public_publication($post);
@@ -454,7 +493,17 @@ final class DOVP_Plugin {
             <hr />
             <p><strong><?php esc_html_e('Current fixed version:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($active_version); ?></p>
             <?php if ($manifest_completed) : ?>
-                <p><strong><?php esc_html_e('Verification:', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Complete. Readers can independently verify this version.', 'digitalownership-publication-verification'); ?></p>
+                <div class="notice notice-success inline" style="margin:1em 0; padding:0.75em 1em;">
+                    <h3 style="margin:0 0 0.5em;"><?php esc_html_e('Registration complete', 'digitalownership-publication-verification'); ?></h3>
+                    <p><?php esc_html_e('This registered publication version is live. Readers can independently verify the fixed article body and its declared local images.', 'digitalownership-publication-verification'); ?></p>
+                    <p><strong><?php esc_html_e('Before making another edit:', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Later saved changes are not independently verified until you create and register a new fixed version.', 'digitalownership-publication-verification'); ?></p>
+                    <p>
+                        <a class="button button-primary" href="<?php echo esc_url(get_permalink($post)); ?>" target="_blank" rel="noopener"><?php esc_html_e('View live publication', 'digitalownership-publication-verification'); ?></a>
+                        <a class="button button-secondary" href="<?php echo esc_url($this->verification_url($record['manifestUrl'])); ?>" target="_blank" rel="noopener"><?php esc_html_e('Verify as a reader', 'digitalownership-publication-verification'); ?></a>
+                        <a class="button button-secondary" href="<?php echo esc_url($record['contentUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open fixed content', 'digitalownership-publication-verification'); ?></a>
+                        <a class="button button-secondary" href="<?php echo esc_url($record['manifestUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open public evidence file', 'digitalownership-publication-verification'); ?></a>
+                    </p>
+                </div>
             <?php else : ?>
                 <p><strong><?php esc_html_e('Verification:', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Two registrations are needed: the fixed content first, then its separate public evidence file.', 'digitalownership-publication-verification'); ?></p>
             <?php endif; ?>
@@ -518,12 +567,14 @@ final class DOVP_Plugin {
                     <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_refresh_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($active_version)), 'dovp_refresh_publication_approval_' . $post->ID . '_' . $active_version)); ?>"><?php esc_html_e('Refresh publication workflow', 'digitalownership-publication-verification'); ?></a></p>
                 <?php endif; ?>
             <?php endif; ?>
-            <p>
-                <a href="<?php echo esc_url($record['contentUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('View fixed content', 'digitalownership-publication-verification'); ?></a>
-                <?php if (!empty($record['manifestUrl'])) : ?>
-                    &nbsp;|&nbsp;<a href="<?php echo esc_url($record['manifestUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('View evidence manifest', 'digitalownership-publication-verification'); ?></a>
-                <?php endif; ?>
-            </p>
+            <?php if (!$manifest_completed) : ?>
+                <p>
+                    <a href="<?php echo esc_url($record['contentUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('View fixed content', 'digitalownership-publication-verification'); ?></a>
+                    <?php if (!empty($record['manifestUrl'])) : ?>
+                        &nbsp;|&nbsp;<a href="<?php echo esc_url($record['manifestUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('View evidence manifest', 'digitalownership-publication-verification'); ?></a>
+                    <?php endif; ?>
+                </p>
+            <?php endif; ?>
         <?php endif; ?>
         <?php if ($records) : ?>
             <?php
@@ -584,75 +635,53 @@ final class DOVP_Plugin {
             return;
         }
 
-        // Gutenberg saves through the REST API without re-rendering classic
-        // meta boxes. Refresh this box only after an explicit successful save.
+        // Gutenberg does not re-render classic meta boxes after a REST save.
+        // Poll only this editor's same-origin status endpoint while it is open.
         wp_enqueue_script('wp-data');
+        wp_add_inline_script('wp-data', 'window.DOVP_EDITOR_STATUS = ' . wp_json_encode(array(
+            'endpointBase' => esc_url_raw(rest_url('digitalownership-publication/v1/editor-status/')),
+            'nonce' => wp_create_nonce('wp_rest'),
+        )) . ';', 'before');
         $script = <<<'JS'
 (function () {
     if (!window.wp || !window.wp.data) return;
 
     function bindEvidenceRefresh() {
-        var manualSaveInProgress = false;
         var refreshInProgress = false;
-        var lastSavedModified = '';
-
-        function savedModified(editor) {
-            if (!editor || 'function' !== typeof editor.getCurrentPostAttribute) return '';
-            return String(editor.getCurrentPostAttribute('modified') || '');
-        }
+        var lastState = '';
+        var settings = window.DOVP_EDITOR_STATUS || {};
 
         function refreshEvidenceBox() {
             if (refreshInProgress) return;
             var currentBox = document.getElementById('dovp-publication');
-            if (!currentBox || !window.fetch || !window.DOMParser) return;
+            var editor = window.wp.data.select('core/editor');
+            var postId = editor && 'function' === typeof editor.getCurrentPostId ? Number(editor.getCurrentPostId()) : 0;
+            if (!currentBox || !postId || !settings.endpointBase || !settings.nonce || !window.fetch) return;
 
             refreshInProgress = true;
-            window.fetch(window.location.href, {
+            window.fetch(settings.endpointBase + postId, {
                 credentials: 'same-origin',
-                cache: 'no-store'
+                cache: 'no-store',
+                headers: { 'X-WP-Nonce': settings.nonce }
             }).then(function (response) {
                 if (!response.ok) throw new Error('Could not refresh publication evidence.');
-                return response.text();
-            }).then(function (html) {
-                var refreshedBox = new window.DOMParser().parseFromString(html, 'text/html').getElementById('dovp-publication');
-                if (refreshedBox && currentBox.parentNode) {
-                    currentBox.parentNode.replaceChild(refreshedBox, currentBox);
+                return response.json();
+            }).then(function (payload) {
+                if (!payload || !payload.html || payload.state === lastState) return;
+                var inside = currentBox.querySelector('.inside');
+                if (inside) {
+                    inside.innerHTML = payload.html;
+                    lastState = payload.state;
                 }
             }).catch(function () {
-                // The editor remains usable if this optional UI refresh fails.
+                // The editor remains usable if this status refresh fails.
             }).finally(function () {
                 refreshInProgress = false;
             });
         }
 
-        window.wp.data.subscribe(function () {
-            var editor = window.wp.data.select('core/editor');
-            if (!editor || 'function' !== typeof editor.isSavingPost) return;
-
-            var isSaving = editor.isSavingPost();
-            var isAutosaving = 'function' === typeof editor.isAutosavingPost' && editor.isAutosavingPost();
-            var currentModified = savedModified(editor);
-
-            // Gutenberg replaces the saved post record after a REST save. This
-            // detects the confirmed server timestamp even where the optional
-            // didPostSaveRequestSucceed selector is unavailable or stale.
-            if (currentModified && lastSavedModified && currentModified !== lastSavedModified) {
-                lastSavedModified = currentModified;
-                window.setTimeout(refreshEvidenceBox, 150);
-            } else if (currentModified) {
-                lastSavedModified = currentModified;
-            }
-
-            if (isSaving && !isAutosaving) {
-                manualSaveInProgress = true;
-            }
-            if (manualSaveInProgress && !isSaving) {
-                manualSaveInProgress = false;
-                // A failed save only reloads the existing panel, while a
-                // confirmed save updates the post timestamp check above.
-                window.setTimeout(refreshEvidenceBox, 150);
-            }
-        });
+        refreshEvidenceBox();
+        window.setInterval(refreshEvidenceBox, 3000);
 
     }
 

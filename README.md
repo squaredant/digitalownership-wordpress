@@ -215,7 +215,8 @@ approval page. That page can independently download the fixed JSON file in the
 approver's browser and compare its SHA-512 with the approval request. A decline
 spends no credit; the writer can request a fresh review of the unchanged fixed
 version. WordPress retrieves the public-ledger result automatically; use
-**Refresh publication workflow** only if it has not updated after a short wait.
+The evidence panel refreshes automatically while the editor is open. It detects
+saved changes and workflow progress without requiring a browser refresh.
 
 After the fixed-version status is **completed**, WordPress creates the evidence
 file from the exact fixed-content file and completed registration evidence. The
@@ -248,8 +249,8 @@ its attached manifest. When the WordPress content changes:
 3. Request and complete fixed-version registration.
 4. The writer may select earlier public versions and add a public revision note.
    WordPress prepares the manifest and the account holder separately approves
-   it. Refresh status only if the workflow has not updated after a short wait. The
-   editor enables the verification link only after both registrations complete.
+   it. The editor refreshes the workflow automatically and enables the
+   verification link only after both registrations complete.
 
 Earlier versioned artifact and manifest URLs remain available as historical
 evidence. The visible post/page always renders the current fixed version.

@@ -4,7 +4,7 @@ Tags: provenance, publishing, verification, blockchain, content integrity
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.0
-Stable tag: 0.7.5
+Stable tag: 0.8.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -40,11 +40,15 @@ DigitalOwnership's [Terms of Service](https://digitalownership.squaredant.com/te
 4. In the DigitalOwnership publication evidence box, select **Use a fixed, verifiable version of this publication and show its public verification link**, then choose **Update**. This enables the public verification link; it does not register content.
 5. Select **Step 2: Create fixed version of saved content**.
 6. The writer requests account review from the evidence box. The DigitalOwnership account holder reads the version-specific preview, checks the SHA-512, and approves or declines.
-7. After the fixed content is registered, choose any earlier public versions readers should be able to open and verify, optionally add a public revision note, then request review of the separate public evidence file. The account holder reviews that exact file before it is registered. Refresh the publication workflow in WordPress only if it has not updated after a short wait.
+7. After the fixed content is registered, choose any earlier public versions readers should be able to open and verify, optionally add a public revision note, then request review of the separate public evidence file. The account holder reviews that exact file before it is registered. The evidence panel refreshes automatically while the editor is open.
 
 Only publicly published, non-password-protected posts and pages can create or serve publication evidence. Moving a post to draft, private, or trash removes its public fixed-content and evidence files and disables their public URLs. Exact bytes are retained in a private WordPress archive that only administrators can download. If the post later becomes public again, create and register a new fixed version; archived or withdrawn evidence cannot be selected or republished as a public historical version. Permanent deletion removes that archive too.
 
 == Changelog ==
+
+= 0.8.0 =
+* Refresh the editor evidence panel from an authenticated WordPress status endpoint, independent of Gutenberg save-event timing.
+* Add a clear completion state with reader-verification and evidence links.
 
 = 0.7.5 =
 * Detect the confirmed saved post timestamp in Gutenberg before refreshing the publication evidence panel.

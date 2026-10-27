@@ -109,8 +109,11 @@ if (!implementation.includes('remove_evidence_for_non_public_post') || !implemen
 if (!implementation.includes("META_PRIVATE_ARCHIVE") || !implementation.includes('archive_publication_evidence')) {
   fail("unpublished publication evidence must be retained only in the private administrator archive");
 }
-if (!implementation.includes('refresh_evidence_box_after_editor_save') || !implementation.includes('enqueue_block_editor_assets')) {
-  fail("the Gutenberg evidence box must refresh after an explicit editor save");
+if (!implementation.includes('refresh_evidence_box_after_editor_save') || !implementation.includes('register_editor_status_route') || !implementation.includes("digitalownership-publication/v1")) {
+  fail("the Gutenberg evidence box must refresh through its authenticated status endpoint");
+}
+if (!implementation.includes("Registration complete") || !implementation.includes("Verify as a reader")) {
+  fail("the editor must show a clear completed-registration state");
 }
 if (!implementation.includes('A previously verified version was withdrawn when this post was no longer public.')) {
   fail("republished posts must warn when no active verified version remains");

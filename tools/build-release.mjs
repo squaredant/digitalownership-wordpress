@@ -23,7 +23,7 @@ try {
   mkdirSync(packageDirectory, { recursive: true });
   // Keep the distributed ZIP limited to files WordPress needs at runtime and
   // the WordPress.org readme. Development documentation stays in the source repo.
-  for (const entry of ["digitalownership-publication-verification.php", "includes", "readme.txt", "LICENSE"]) {
+  for (const entry of ["digitalownership-publication-verification.php", "includes", "assets", "readme.txt", "LICENSE"]) {
     cpSync(resolve(root, entry), resolve(packageDirectory, entry), { recursive: true });
   }
   mkdirSync(dist, { recursive: true });

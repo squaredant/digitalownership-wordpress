@@ -7,6 +7,15 @@
 This WordPress plugin is the first publishing integration for the
 DigitalOwnership web-publication verification protocol.
 
+## Upgrade Compatibility
+
+Version `0.9.0` deliberately replaces the earlier beta workflows. It supports
+only private JSON review followed by administrator approval and two
+account-holder approvals. Markdown fixed files, manually attached manifests,
+and versions created by prior beta releases are not supported after upgrade.
+Do not install this release on a site that needs to keep earlier beta evidence
+available.
+
 It lets an editor create a fixed version of a selected post or page. The page
 is then rendered from that fixed version, rather than from a separately
 maintained copy of the text. The account owner approves its registration, then
@@ -70,17 +79,19 @@ The site token is stored in the WordPress options table and can be removed in
 WordPress or revoked from the linked devices list in the DigitalOwnership
 account. Restrict WordPress administrator access accordingly.
 
-## Editorial Separation Of Duties
+## Roles And Approval Separation
 
 The intended newsroom or publishing workflow does not require reporters to
 have a DigitalOwnership account or a pipeline credential:
 
-- A WordPress **Editor** writes and saves the publication, creates its fixed
-  version, and may request account approval.
+- A WordPress **Editor** writes and saves the publication, creates its private
+  fixed version, and submits that exact version for administrator review.
 - A WordPress **Administrator** connects or removes the site-level
-  DigitalOwnership device token.
-- The DigitalOwnership **account holder** reviews the fixed content and
-  fingerprint, then approves or declines each registration request.
+  DigitalOwnership device token, then approves or declines the editor's
+  proposed version.
+- The DigitalOwnership **account holder** reviews the administrator-approved
+  fixed content and fingerprint, then approves or declines each registration
+  request.
 
 Keep the organisation-owned DigitalOwnership account access and pipeline
 credentials with the responsible senior publisher or administrator. A
@@ -93,22 +104,27 @@ version-specific fixed JSON file, rather than the mutable current WordPress
 post. A person with unrestricted WordPress or server access remains an
 operational trust boundary and should be controlled separately.
 
-The plugin uses one registration path: **Request account review of fixed
-publication**. The writer creates the fixed version and requests review. The
-account holder reads that immutable version, checks its SHA-512 in
-DigitalOwnership, then approves or declines before a credit is spent.
-After that registration completes, the writer can choose which earlier public
-versions readers should see, add an optional public revision note, and request
-the separate evidence-file review. The plugin stores only
-public ledger evidence in WordPress post metadata.
+If the account holder declines or does not complete a fixed-content or
+evidence-file review before its link expires, a WordPress Administrator can
+request a new review. It issues a new review link for the same file and
+SHA-512 without repeating administrator approval or spending a credit.
+
+The plugin uses a staged path. The writer first submits the fixed version to a
+WordPress administrator. After the administrator approves it, the linked
+DigitalOwnership account holder reads that immutable version, checks its
+SHA-512 in DigitalOwnership, then approves or declines before a credit is
+spent. The writer can select earlier public versions for disclosure and add an
+optional public revision note before administrator review. The plugin stores only
+public-ledger evidence in WordPress post metadata.
 
 After the fixed-version registration completes, WordPress builds the evidence
 file from the completed public-ledger evidence and unchanged fixed content. It
 obtains the linked account email only to place it in the manifest, where it is
 public by design and needed by visitors to derive the account-linked registry
 key. The account page opens the evidence-file review with a rendered preview
-and its distinct SHA-512 fingerprint. Once completed, WordPress publishes the
-exact drafted bytes and enables the visitor-verification link.
+and its distinct SHA-512 fingerprint. Once that registration completes,
+WordPress publishes the exact administrator-approved version and enables the
+visitor-verification link.
 
 ## Release Package
 
@@ -163,8 +179,12 @@ authorship, or legal ownership.
 3. As a WordPress Administrator, open **Settings > DigitalOwnership
    Verification** and select **Connect DigitalOwnership account**. Sign in with
    the organisation-owned publishing account and approve the connection.
-4. Edit a post or page. Save or update it first. In the **DigitalOwnership
-   publication evidence** box, select **Create fixed version of saved content**.
+4. Edit a post or page and save it. In the **DigitalOwnership publication
+   evidence** box, enable verification and select **Create private fixed
+   version of saved content**. Submit that exact version for administrator
+   approval. An administrator approves or declines it; the linked account
+   holder then approves the two registration requests before WordPress
+   publishes it.
 
 Creating a fixed version uses the last saved WordPress content. Unsaved block
 editor changes are not included. If the post is edited after a fixed version is
@@ -188,9 +208,11 @@ when the publication changes.
 
 ## Publication Visibility And Removal
 
-Only a publicly published, non-password-protected post or page can create or
-serve publication evidence. Drafts, private posts, password-protected posts,
-and scheduled posts cannot create a fixed version.
+Drafts, pending posts, private posts, and existing public posts can create a
+private fixed version. A private candidate is not publicly readable. It becomes
+public only after a WordPress administrator has approved it and the linked
+DigitalOwnership account holder has approved both registration requests.
+Password-protected posts are not supported.
 
 If a publication is moved to draft or private status, or is trashed, the plugin
 removes its web-accessible fixed-content and evidence files and makes the former
@@ -207,14 +229,17 @@ replaces an earlier registered version without republishing the earlier text.
 
 ## Register A Version
 
-The writer uses **Request account review of fixed publication**. The account
-holder separately reads the immutable fixed-publication preview, checks the
-exact SHA-512 fingerprint, and either approves or declines. WordPress provides
-the readable preview and the SHA-512 before opening the DigitalOwnership
-approval page. That page can independently download the fixed JSON file in the
-approver's browser and compare its SHA-512 with the approval request. A decline
-spends no credit; the writer can request a fresh review of the unchanged fixed
-version. WordPress retrieves the public-ledger result automatically; use
+The writer creates a private fixed version and uses **Submit exact version for
+administrator review**. A WordPress administrator reads the rendered private
+version and its SHA-512, then approves or declines the request. Approval opens
+the first DigitalOwnership account review. The account holder separately reads
+the immutable fixed-publication preview, checks the exact SHA-512 fingerprint,
+and either approves or declines. WordPress provides the readable preview and
+the SHA-512 before opening the DigitalOwnership approval page. That page can
+independently download the fixed JSON file in the approver's browser and
+compare its SHA-512 with the approval request. A decline spends no credit; the
+writer can revise and submit a new private fixed version. WordPress retrieves
+the public-ledger result automatically; use
 The evidence panel refreshes automatically while the editor is open. It detects
 saved changes and workflow progress without requiring a browser refresh.
 
@@ -327,14 +352,16 @@ version to use versioned image URLs after installing this release.
 This checklist is for the person installing or maintaining the plugin, not for
 ordinary readers or editorial users publishing a normal version.
 
-1. Generate a JSON version for a test page.
-2. Confirm the page body matches the generated artifact.
+1. Create a private JSON version for a test draft page, then submit it for
+   administrator review.
+2. As an administrator, confirm the rendered private preview and SHA-512 match
+   the intended saved post before approving it.
 3. Confirm the artifact URL and any versioned local-image URL return
    `Access-Control-Allow-Origin: https://digitalownership.squaredant.com`.
-4. Request and approve the fixed-version registration in WordPress.
-5. After fixed-content registration, choose any public earlier versions to
-   disclose, optionally add a public revision note, and request the separate
-   rendered evidence-file review.
+4. As the linked account holder, approve the fixed-version registration in
+   DigitalOwnership.
+5. Approve the automatically prepared, separately rendered evidence-file
+   registration in DigitalOwnership.
 6. Confirm the visible verification link opens
    `https://digitalownership.squaredant.com/verify-publication` with the
    manifest URL parameter.

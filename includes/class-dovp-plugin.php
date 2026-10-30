@@ -9,8 +9,8 @@ final class DOVP_Plugin {
     const REGISTRY_ADDRESS = '0xf495d81eb4A64d213f6BAC2bD23EE9A147956169';
     const CHAIN_ID = '0xa4b1';
     const META_ENABLED = '_dovp_enabled';
-    const META_FORMAT = '_dovp_format';
     const META_VERSION = '_dovp_active_version';
+    const META_CANDIDATE_VERSION = '_dovp_candidate_version';
     const META_VERSIONS = '_dovp_versions';
     const META_PRIVATE_ARCHIVE = '_dovp_private_archive';
     const MANIFEST_SCHEMA = 'digitalownership-publication-manifest-v1';
@@ -48,13 +48,14 @@ final class DOVP_Plugin {
         add_action('before_delete_post', array($this, 'remove_publication_evidence'));
         add_action('admin_post_dovp_download_archived_evidence', array($this, 'download_archived_evidence'));
         add_action('admin_post_dovp_generate_canonical', array($this, 'generate_canonical'));
-        add_action('admin_post_dovp_attach_manifest', array($this, 'attach_manifest'));
+        add_action('admin_post_dovp_submit_editorial_review', array($this, 'submit_editorial_review'));
+        add_action('admin_post_dovp_approve_editorial_review', array($this, 'approve_editorial_review'));
+        add_action('admin_post_dovp_decline_editorial_review', array($this, 'decline_editorial_review'));
         add_action('admin_post_dovp_connect_account', array($this, 'connect_account'));
         add_action('admin_post_dovp_disconnect_account', array($this, 'disconnect_account'));
         add_action('admin_post_dovp_request_publication_approval', array($this, 'request_publication_approval'));
-        add_action('admin_post_dovp_refresh_publication_approval', array($this, 'refresh_publication_approval'));
-        add_action('admin_post_dovp_prepare_manifest', array($this, 'prepare_manifest'));
         add_action('admin_post_dovp_request_manifest_approval', array($this, 'request_manifest_approval'));
+        add_action('admin_post_dovp_refresh_publication_approval', array($this, 'refresh_publication_approval'));
         add_action('dovp_process_publication_workflow', array($this, 'process_publication_workflow'), 10, 2);
         add_action('admin_notices', array($this, 'render_admin_notice'));
         add_action('admin_menu', array($this, 'add_admin_pages'));
@@ -80,7 +81,7 @@ final class DOVP_Plugin {
         $content = '<p class="privacy-policy-tutorial">' . esc_html__('Use this suggested text only when this plugin is enabled for one or more publications. Review it and adapt it to your site before publishing.', 'digitalownership-publication-verification') . '</p>'
             . '<h2>' . esc_html__('DigitalOwnership Publication Verification', 'digitalownership-publication-verification') . '</h2>'
             . '<p>' . esc_html__('This site uses DigitalOwnership Publication Verification for selected posts or pages. The plugin creates a fixed public JSON copy of the selected post body and may create a public evidence manifest. These public files are stored on this site and can be read by site visitors and independent verification tools.', 'digitalownership-publication-verification') . '</p>'
-            . '<p>' . esc_html__('When an authorised editor requests registration and the linked DigitalOwnership account holder approves it, the plugin sends DigitalOwnership the SHA-512 fingerprint of the fixed JSON file, its hash scope, blockchain registry details, and a request identifier. The plugin does not upload the post body, local images, attachments, or other original file bytes to DigitalOwnership for registration.', 'digitalownership-publication-verification') . '</p>'
+            . '<p>' . esc_html__('An editor may submit a private fixed version for review. After a WordPress administrator approves it and the linked DigitalOwnership account holder approves the registration, the plugin sends DigitalOwnership the SHA-512 fingerprint of the fixed JSON file, its hash scope, blockchain registry details, and a request identifier. The plugin does not upload the post body, local images, attachments, or other original file bytes to DigitalOwnership for registration.', 'digitalownership-publication-verification') . '</p>'
             . '<p>' . esc_html__('A completed public evidence manifest contains the registration email address associated with the linked DigitalOwnership account, the fixed-content URL, its SHA-512 fingerprint, and public blockchain registration references. The email address is included because independent verifiers use it to derive the account-linked registration key. Do not enable this plugin for content where that disclosure is inappropriate.', 'digitalownership-publication-verification') . '</p>'
             . '<p>' . sprintf(
                 /* translators: 1: Terms URL. 2: Privacy URL. */
@@ -103,7 +104,7 @@ final class DOVP_Plugin {
             'top'
         );
         add_rewrite_rule(
-            '^digitalownership-publication/([0-9]+)/([A-Za-z0-9._-]+)/(content|manifest|manifest-draft|workflow)\\.(json|md)$',
+            '^digitalownership-publication/([0-9]+)/([A-Za-z0-9._-]+)/(content|manifest|manifest-draft|workflow)\\.(json)$',
             'index.php?dovp_post_id=$matches[1]&dovp_version=$matches[2]&dovp_artifact=$matches[3]&dovp_extension=$matches[4]',
             'top'
         );
@@ -144,12 +145,15 @@ final class DOVP_Plugin {
         if (!$post_id || !$version) {
             return;
         }
-        if (!$this->is_public_publication(get_post($post_id))) {
-            $this->send_not_found();
-        }
-
         list($stored_version, $record) = $this->record_for_version($post_id, $version);
         if (!is_array($record)) {
+            $this->send_not_found();
+        }
+        $post = get_post($post_id);
+        $is_public_artifact = $this->is_public_publication($post) && $this->record_is_publicly_released($record);
+        $is_review_request = $this->review_token_valid($record);
+        $is_manifest_draft_request = 'manifest-draft' === $artifact && $this->manifest_draft_token_valid($record);
+        if (!$is_public_artifact && !$is_review_request && !$is_manifest_draft_request) {
             $this->send_not_found();
         }
         if ('' !== $asset_index) {
@@ -159,16 +163,14 @@ final class DOVP_Plugin {
             return;
         }
         if ('workflow' === $artifact) {
-            if ('json' !== $extension) {
+            if ('json' !== $extension || (!$is_public_artifact && !$is_review_request)) {
                 $this->send_not_found();
             }
             $this->send_workflow_status($post_id, $stored_version, $record);
         }
 
         if ('manifest-draft' === $artifact) {
-            // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- An unguessable draft token authorizes this private route.
-            $draft_token = sanitize_text_field(wp_unslash($_GET['dovp_draft'] ?? ''));
-            if ('json' !== $extension || empty($record['manifestDraft']) || empty($record['manifestDraftToken']) || !hash_equals((string) $record['manifestDraftToken'], $draft_token)) {
+            if ('json' !== $extension || !$is_manifest_draft_request) {
                 $this->send_not_found();
             }
             // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Draft token authorizes this private preview.
@@ -179,8 +181,7 @@ final class DOVP_Plugin {
         }
 
         $path_key = 'content' === $artifact ? 'contentPath' : 'manifestPath';
-        $expected_extension = 'content' === $artifact ? ($record['format'] ?? '') : 'json';
-        if ($expected_extension !== $extension || empty($record[$path_key])) {
+        if ((!$is_public_artifact && !$is_review_request) || 'json' !== $extension || empty($record[$path_key])) {
             $this->send_not_found();
         }
 
@@ -191,19 +192,18 @@ final class DOVP_Plugin {
 
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Public fixed-content preview is intentionally readable.
         if ('content' === $artifact && '1' === sanitize_text_field(wp_unslash($_GET['dovp_preview'] ?? ''))) {
-            $this->send_fixed_content_preview($path, $post_id, $stored_version, $extension);
+            $this->send_fixed_content_preview($path, $post_id, $stored_version, $extension, $record, $is_review_request);
         }
 
-        $content_type = 'md' === $extension ? 'text/markdown; charset=utf-8' : 'application/json; charset=utf-8';
         nocache_headers();
-        header('Content-Type: ' . $content_type);
+        header('Content-Type: application/json; charset=utf-8');
         header('Content-Length: ' . (string) filesize($path));
         header('Access-Control-Allow-Origin: https://digitalownership.squaredant.com');
         header('Access-Control-Allow-Methods: GET');
         header('Vary: Origin');
         header('X-Content-Type-Options: nosniff');
         header('Cache-Control: no-store');
-        // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Stored immutable JSON or Markdown bytes are served verbatim.
+        // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Stored immutable JSON bytes are served verbatim.
         echo $this->filesystem_contents($path);
         exit;
     }
@@ -247,11 +247,14 @@ final class DOVP_Plugin {
         exit;
     }
 
-    private function send_fixed_content_preview($path, $post_id, $version, $extension) {
+    private function send_fixed_content_preview($path, $post_id, $version, $extension, $record, $private_review = false) {
         $source = file_get_contents($path);
-        $body = 'md' === $extension ? $this->render_markdown_content($source) : $this->render_json_content($source);
+        $body = $this->render_json_content($source);
         if (null === $body) {
             $this->send_not_found();
+        }
+        if ($private_review) {
+            $body = $this->review_asset_urls($body, $record);
         }
         $post = get_post($post_id);
         $title = $post ? get_the_title($post) : __('Fixed publication', 'digitalownership-publication-verification');
@@ -261,12 +264,28 @@ final class DOVP_Plugin {
         header('Cache-Control: public, max-age=31536000, immutable');
         echo '<!doctype html><html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />';
         echo '<title>' . esc_html($title) . '</title>';
-        echo '<style>body{max-width:760px;margin:3rem auto;padding:0 1.25rem;font:18px/1.6 Georgia,serif;color:#1d2a24}img{max-width:100%;height:auto}a{color:#006e5a}.dovp-fixed-note{font:14px/1.4 system-ui,sans-serif;color:#52615a;border-bottom:1px solid #d6ddd8;padding-bottom:1rem;margin-bottom:2rem}</style>';
+        $this->print_preview_styles();
         /* translators: %s: fixed publication version identifier. */
         echo '</head><body><p class="dovp-fixed-note">' . esc_html(sprintf(__('Fixed publication version %s. This is a rendered view of the exact JSON file under review.', 'digitalownership-publication-verification'), $version)) . '</p>';
         // Rendered publication HTML was sanitized while the fixed artifact was created.
         echo '<main><h1>' . esc_html($title) . '</h1>' . wp_kses_post($body) . '</main></body></html>';
         exit;
+    }
+
+    private function review_asset_urls($body, $record) {
+        $token = is_array($record) ? sanitize_text_field($record['reviewToken'] ?? '') : '';
+        $assets = is_array($record['assetSources'] ?? null) ? $record['assetSources'] : array();
+        if (!$token || !$assets) {
+            return $body;
+        }
+        foreach ($assets as $asset) {
+            $url = is_array($asset) ? esc_url_raw($asset['url'] ?? '') : '';
+            if (!$url) {
+                continue;
+            }
+            $body = str_replace($url, add_query_arg('dovp_review', rawurlencode($token), $url), $body);
+        }
+        return $body;
     }
 
     private function send_manifest_preview($contents, $post_id, $version) {
@@ -284,7 +303,7 @@ final class DOVP_Plugin {
         echo '<!doctype html><html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />';
         /* translators: %s: publication title. */
         echo '<title>' . esc_html(sprintf(__('Evidence file for %s', 'digitalownership-publication-verification'), $title)) . '</title>';
-        echo '<style>body{max-width:760px;margin:3rem auto;padding:0 1.25rem;font:18px/1.6 Georgia,serif;color:#1d2a24}.dovp-note{font:14px/1.45 system-ui,sans-serif;color:#52615a;border-bottom:1px solid #d6ddd8;padding-bottom:1rem;margin-bottom:2rem}dl{font:16px/1.5 system-ui,sans-serif}dt{font-weight:700;margin-top:1rem}dd{margin:0;overflow-wrap:anywhere}code{font:13px/1.4 ui-monospace,monospace}</style>';
+        $this->print_preview_styles();
         /* translators: %s: fixed publication version identifier. */
         echo '</head><body><p class="dovp-note">' . esc_html(sprintf(__('Public evidence file for fixed publication version %s. It connects this fixed file to its completed registration.', 'digitalownership-publication-verification'), $version)) . '</p>';
         echo '<main><h1>' . esc_html__('Publication evidence file', 'digitalownership-publication-verification') . '</h1><dl>';
@@ -315,6 +334,18 @@ final class DOVP_Plugin {
         }
         echo '</dl></main></body></html>';
         exit;
+    }
+
+    private function print_preview_styles() {
+        $handle = 'dovp-publication-preview';
+        wp_register_style(
+            $handle,
+            DOVP_URL . 'assets/css/publication-preview.css',
+            array(),
+            DOVP_VERSION
+        );
+        wp_enqueue_style($handle);
+        wp_print_styles(array($handle));
     }
 
     private function send_public_json($contents, $immutable = true) {
@@ -415,25 +446,26 @@ final class DOVP_Plugin {
         return rest_ensure_response(array(
             'html' => $html,
             'state' => hash('sha256', $html),
+            'postStatus' => sanitize_key($post->post_status),
         ));
     }
 
     public function render_meta_box($post) {
         $enabled = '1' === get_post_meta($post->ID, self::META_ENABLED, true);
-        $is_public = $this->is_public_publication($post);
         $active_version = get_post_meta($post->ID, self::META_VERSION, true);
         $records = $this->publication_records($post->ID);
+        $active_record = $this->active_record($post->ID);
+        $candidate_version = get_post_meta($post->ID, self::META_CANDIDATE_VERSION, true);
+        $candidate = $this->candidate_record($post->ID);
         $private_archive = $this->private_archive($post->ID);
-        $record = $active_version && isset($records[$active_version]) ? $records[$active_version] : null;
-        $withdrawn_evidence = $is_public && !$record && !empty($private_archive);
-        if ($record && $this->ensure_manifest_draft_token($record)) {
-            if (!empty($record['manifestApprovalUrl'])) {
-                $record['manifestApprovalUrl'] = $this->publication_approval_url($record['manifestApprovalUrl'], $post->ID, $record, 'manifest');
+        if ($candidate && $this->ensure_manifest_draft_token($candidate)) {
+            if (!empty($candidate['manifestApprovalUrl'])) {
+                $candidate['manifestApprovalUrl'] = $this->publication_approval_url($candidate['manifestApprovalUrl'], $post->ID, $candidate, 'manifest');
             }
-            $records[$active_version] = $record;
+            $records[$candidate_version] = $candidate;
             update_post_meta($post->ID, self::META_VERSIONS, $records);
         }
-        $source_changed = $record && !empty($record['sourceModifiedGmt']) && $record['sourceModifiedGmt'] !== get_post_modified_time('c', true, $post);
+        $candidate_changed = $candidate && !$this->snapshot_matches_post($post, $candidate);
 
         wp_nonce_field('dovp_save_post', 'dovp_save_post_nonce');
         ?>
@@ -444,12 +476,10 @@ final class DOVP_Plugin {
             </label>
         </p>
         <p class="description">
-            <?php esc_html_e('This checkbox does not register anything. It enables the public verification link for this post after you save or update it. A fixed version captures the last saved page text. Later WordPress edits are not shown until you create and register a new fixed version.', 'digitalownership-publication-verification'); ?>
+            <?php esc_html_e('This checkbox does not register anything. After you save, it lets you create a private fixed version for administrator and account review. A new publication is made public only after its fixed content and evidence file are registered.', 'digitalownership-publication-verification'); ?>
         </p>
-        <?php if (!$is_public) : ?>
-            <p class="description"><strong><?php esc_html_e('Step 1: Publish this post first.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Fixed content and its public verification link can be created only for a publicly published, non-password-protected post or page. After publishing, enable the checkbox above and save once.', 'digitalownership-publication-verification'); ?></p>
-        <?php elseif (!$enabled && !$record) : ?>
-            <p class="description"><strong><?php esc_html_e('Step 1: Enable public verification.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Select the checkbox above and choose Update. After the save, this box will offer Step 2: create the fixed version for account review.', 'digitalownership-publication-verification'); ?></p>
+        <?php if ($enabled) : ?>
+            <?php $this->render_registration_progress($candidate, $active_record, $candidate_changed); ?>
         <?php endif; ?>
         <?php if ($private_archive && current_user_can('manage_options')) : ?>
             <hr />
@@ -470,111 +500,108 @@ final class DOVP_Plugin {
                 <?php endforeach; ?>
             </ul>
         <?php endif; ?>
-        <?php if ($source_changed) : ?>
-            <p style="color:#b32d2e;"><strong><?php esc_html_e('This post has changed since its fixed version was created. Create and register a new fixed version before presenting the changed text as verified.', 'digitalownership-publication-verification'); ?></strong></p>
-        <?php elseif ($withdrawn_evidence) : ?>
-            <p style="color:#b32d2e;"><strong><?php esc_html_e('A previously verified version was withdrawn when this post was no longer public. This public post has no current verified version. Create and register a new fixed version before presenting it as verified.', 'digitalownership-publication-verification'); ?></strong></p>
-        <?php endif; ?>
-        <?php if ($is_public && $enabled && (!$record || $source_changed)) : ?>
+
+        <?php if (!$enabled) : ?>
+            <p class="description"><strong><?php esc_html_e('Before registration: enable publication verification.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Select the checkbox above and save this post. You can then create a private fixed version for review.', 'digitalownership-publication-verification'); ?></p>
+        <?php elseif ($candidate_changed) : ?>
+            <div class="notice notice-warning inline"><p><strong><?php esc_html_e('This post changed after its private fixed version was created.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('The old candidate cannot be approved or published. Create a new fixed version from the saved text.', 'digitalownership-publication-verification'); ?></p></div>
             <p>
                 <a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_generate_canonical&post_id=' . $post->ID), 'dovp_generate_canonical_' . $post->ID)); ?>">
-                    <?php esc_html_e('Step 2: Create fixed version of saved content', 'digitalownership-publication-verification'); ?>
+                    <?php esc_html_e('Create a new private fixed version', 'digitalownership-publication-verification'); ?>
                 </a>
             </p>
-            <?php if (!$record) : ?><p class="description"><?php esc_html_e('This does not spend a credit. It creates the exact saved JSON version that the writer can send for account review.', 'digitalownership-publication-verification'); ?></p><?php endif; ?>
-        <?php endif; ?>
-        <?php if ($record && !$source_changed) : ?>
+        <?php elseif ($candidate) : ?>
             <?php
-            $content_completed = 'completed' === ($record['registrationStatus'] ?? '') && !empty($record['registrationResult']);
-            $manifest_completed = !empty($record['manifestUrl']);
-            $fixed_publication_url = $this->fixed_content_preview_url($record);
-            $content_approval_terminal = in_array($record['approvalStatus'] ?? '', array('expired', 'rejected'), true);
+            $editorial_status = sanitize_key($candidate['editorialStatus'] ?? 'draft');
+            $content_completed = 'completed' === ($candidate['registrationStatus'] ?? '') && !empty($candidate['registrationResult']);
+            $manifest_completed = !empty($candidate['manifestUrl']);
+            $preview_url = $this->fixed_content_preview_url($candidate);
+            $content_approval_terminal = in_array($candidate['approvalStatus'] ?? '', array('expired', 'rejected'), true);
+            $manifest_approval_terminal = in_array($candidate['manifestApprovalStatus'] ?? '', array('expired', 'rejected'), true);
+            $candidate_content_path = $this->safe_storage_path($candidate['contentPath'] ?? '');
+            $candidate_sha512 = $candidate_content_path && is_readable($candidate_content_path) ? hash_file('sha512', $candidate_content_path) : '';
+            $manifest_draft_url = $this->manifest_draft_url($post->ID, $candidate);
+            $manifest_preview_url = $this->manifest_draft_preview_url($post->ID, $candidate);
+            $manifest_sha512 = strtolower(sanitize_text_field($candidate['manifestDraftSha512'] ?? ''));
             ?>
             <hr />
-            <p><strong><?php esc_html_e('Current fixed version:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($active_version); ?></p>
-            <?php if ($manifest_completed) : ?>
-                <div class="notice notice-success inline" style="margin:1em 0; padding:0.75em 1em;">
-                    <h3 style="margin:0 0 0.5em;"><?php esc_html_e('Registration complete', 'digitalownership-publication-verification'); ?></h3>
-                    <p><?php esc_html_e('This registered publication version is live. Readers can independently verify the fixed article body and its declared local images.', 'digitalownership-publication-verification'); ?></p>
-                    <p><strong><?php esc_html_e('Before making another edit:', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Later saved changes are not independently verified until you create and register a new fixed version.', 'digitalownership-publication-verification'); ?></p>
-                    <p>
-                        <a class="button button-primary" href="<?php echo esc_url(get_permalink($post)); ?>" target="_blank" rel="noopener"><?php esc_html_e('View live publication', 'digitalownership-publication-verification'); ?></a>
-                        <a class="button button-secondary" href="<?php echo esc_url($this->verification_url($record['manifestUrl'])); ?>" target="_blank" rel="noopener"><?php esc_html_e('Verify as a reader', 'digitalownership-publication-verification'); ?></a>
-                        <a class="button button-secondary" href="<?php echo esc_url($record['contentUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open fixed content', 'digitalownership-publication-verification'); ?></a>
-                        <a class="button button-secondary" href="<?php echo esc_url($record['manifestUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open public evidence file', 'digitalownership-publication-verification'); ?></a>
-                    </p>
-                </div>
-            <?php else : ?>
-                <p><strong><?php esc_html_e('Verification:', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Two registrations are needed: the fixed content first, then its separate public evidence file.', 'digitalownership-publication-verification'); ?></p>
+            <p><strong><?php esc_html_e('Private fixed version:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($candidate_version); ?></p>
+            <?php if (!$content_completed) : ?>
+                <p><a class="button button-secondary" href="<?php echo esc_url($preview_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Read exact fixed version', 'digitalownership-publication-verification'); ?></a> <a href="<?php echo esc_url($this->content_review_url($candidate)); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open exact JSON', 'digitalownership-publication-verification'); ?></a></p>
             <?php endif; ?>
-            <?php if (!$manifest_completed && get_option(self::OPTION_SITE_TOKEN, '')) : ?>
-                <?php if (!$content_completed) : ?>
-                    <h3><?php esc_html_e('Step 1 of 2: Register the fixed content', 'digitalownership-publication-verification'); ?></h3>
-                    <?php if ((empty($record['approvalId']) || $content_approval_terminal) && empty($record['registrationId'])) : ?>
-                        <?php if ($content_approval_terminal) : ?><p><?php esc_html_e('The previous review request was not approved. The writer can request a fresh review for this unchanged fixed version.', 'digitalownership-publication-verification'); ?></p><?php endif; ?>
-                        <p><?php esc_html_e('This sends the saved version to the linked DigitalOwnership account for review. The account holder sees the rendered publication, the exact JSON file, and its SHA-512 fingerprint before deciding.', 'digitalownership-publication-verification'); ?></p>
-                        <?php if ($fixed_publication_url) : ?><p><a class="button button-secondary" href="<?php echo esc_url($fixed_publication_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Read fixed publication version', 'digitalownership-publication-verification'); ?></a></p><?php endif; ?>
-                        <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_request_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($active_version)), 'dovp_request_publication_approval_' . $post->ID . '_' . $active_version)); ?>"><?php esc_html_e('Request account review of fixed publication', 'digitalownership-publication-verification'); ?></button></p>
-                        <p class="description"><?php esc_html_e('The writer requests review. The account holder separately decides whether to approve registration of this exact fixed JSON file. One credit is spent only after approval.', 'digitalownership-publication-verification'); ?></p>
-                    <?php else : ?>
-                        <p><?php esc_html_e('Your review request is pending. The account holder reviews the fixed publication and decides whether to approve registration of its exact SHA-512 fingerprint.', 'digitalownership-publication-verification'); ?></p>
-                        <?php if ($fixed_publication_url) : ?><p><a class="button button-secondary" href="<?php echo esc_url($fixed_publication_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Read fixed publication version', 'digitalownership-publication-verification'); ?></a></p><?php endif; ?>
-                        <?php if (!empty($record['approvalUrl']) && 'approved' !== ($record['approvalStatus'] ?? '')) : ?><p><a class="button button-primary" href="<?php echo esc_url($record['approvalUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open account-holder review of fixed publication', 'digitalownership-publication-verification'); ?></a></p><?php endif; ?>
-                        <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_refresh_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($active_version)), 'dovp_refresh_publication_approval_' . $post->ID . '_' . $active_version)); ?>"><?php esc_html_e('Refresh fixed-content registration status', 'digitalownership-publication-verification'); ?></a></p>
-                        <?php if (!empty($record['approvalStatus'])) : ?><p><strong><?php esc_html_e('Approval status:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($record['approvalStatus']); ?></p><?php endif; ?>
-                        <?php if (!empty($record['registrationStatus'])) : ?><p><strong><?php esc_html_e('Registration status:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($record['registrationStatus']); ?></p><?php endif; ?>
-                        <?php if (!empty($record['registrationError'])) : ?><p style="color:#b32d2e;"><strong><?php esc_html_e('Registration error:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($record['registrationError']); ?></p><?php endif; ?>
-                    <?php endif; ?>
-                <?php else : ?>
-                    <h3><?php esc_html_e('Step 1 of 2: Fixed content registered', 'digitalownership-publication-verification'); ?></h3>
-                    <p><?php esc_html_e('The fixed publication has been registered. Choose whether readers should see links to any earlier public versions before requesting review of the public evidence file.', 'digitalownership-publication-verification'); ?></p>
-                    <h3><?php esc_html_e('Step 2 of 2: Register the public evidence file', 'digitalownership-publication-verification'); ?></h3>
-                    <?php if (empty($record['manifestDraft'])) : ?>
-                        <?php $history_candidates = $this->public_history_candidates($post->ID, $active_version); ?>
-                        <p><?php esc_html_e('The evidence file will contain the fixed-content URL, fingerprint, registration key, and transaction reference from step 1. You may also disclose selected earlier public versions to readers.', 'digitalownership-publication-verification'); ?></p>
-                        <?php if ($history_candidates) : ?>
-                            <fieldset>
-                                <legend><strong><?php esc_html_e('Previous verified versions to show readers', 'digitalownership-publication-verification'); ?></strong></legend>
-                                <p class="description"><?php esc_html_e('Selected versions will be linked from the public verification panel and recorded in this evidence file. Private or archived versions cannot be selected here.', 'digitalownership-publication-verification'); ?></p>
-                                <?php foreach ($history_candidates as $candidate) : ?>
-                                    <label style="display:block; margin:0.5em 0;">
-                                        <input form="dovp-action-form" type="checkbox" name="dovp_previous_versions[]" value="<?php echo esc_attr($candidate['version']); ?>" />
-                                        <?php /* translators: 1: fixed publication version identifier. 2: UTC registration timestamp. */ ?>
-                                        <?php echo esc_html(sprintf(__('Version %1$s, registered %2$s UTC', 'digitalownership-publication-verification'), $candidate['version'], gmdate('Y-m-d H:i:s', strtotime($candidate['registeredAt'])))); ?>
-                                    </label>
-                                <?php endforeach; ?>
-                            </fieldset>
-                            <p>
-                                <label for="dovp-revision-note"><strong><?php esc_html_e('Revision note (optional)', 'digitalownership-publication-verification'); ?></strong></label><br />
-                                <textarea form="dovp-action-form" id="dovp-revision-note" name="dovp_revision_note" rows="3" maxlength="500" style="width:100%; max-width:640px;"></textarea>
-                            </p>
-                            <p class="description"><?php esc_html_e('For example: “Updated deadline and clarified eligibility criteria.” This note is public and becomes part of the registered evidence file.', 'digitalownership-publication-verification'); ?></p>
-                        <?php else : ?>
-                            <p class="description"><?php esc_html_e('There are no earlier public registered versions available to disclose.', 'digitalownership-publication-verification'); ?></p>
-                        <?php endif; ?>
-                        <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_prepare_manifest&post_id=' . $post->ID . '&version=' . rawurlencode($active_version)), 'dovp_prepare_manifest_' . $post->ID . '_' . $active_version)); ?>"><?php esc_html_e('Request review of public evidence file', 'digitalownership-publication-verification'); ?></button></p>
-                    <?php else : ?>
-                        <p><?php esc_html_e('The public evidence file is ready. The account holder receives a second review where its exact file and SHA-512 fingerprint are shown.', 'digitalownership-publication-verification'); ?></p>
-                        <?php if (empty($record['manifestApprovalId']) && empty($record['manifestRegistrationId'])) : ?>
-                            <p><?php esc_html_e('Creating the account review request.', 'digitalownership-publication-verification'); ?></p>
-                        <?php else : ?>
-                            <?php if (!empty($record['manifestApprovalUrl']) && 'approved' !== ($record['manifestApprovalStatus'] ?? '')) : ?><p><a class="button button-primary" href="<?php echo esc_url($record['manifestApprovalUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open account-holder review of public evidence file', 'digitalownership-publication-verification'); ?></a></p><?php endif; ?>
-                            <?php if (!empty($record['manifestApprovalStatus'])) : ?><p><strong><?php esc_html_e('Approval status:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($record['manifestApprovalStatus']); ?></p><?php endif; ?>
-                            <?php if (!empty($record['manifestRegistrationStatus'])) : ?><p><strong><?php esc_html_e('Registration status:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($record['manifestRegistrationStatus']); ?></p><?php endif; ?>
-                            <?php if (!empty($record['manifestRegistrationError'])) : ?><p style="color:#b32d2e;"><strong><?php esc_html_e('Registration error:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($record['manifestRegistrationError']); ?></p><?php endif; ?>
-                        <?php endif; ?>
-                    <?php endif; ?>
-                    <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_refresh_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($active_version)), 'dovp_refresh_publication_approval_' . $post->ID . '_' . $active_version)); ?>"><?php esc_html_e('Refresh publication workflow', 'digitalownership-publication-verification'); ?></a></p>
+            <?php if (!$content_completed && $candidate_sha512) : ?>
+                <p><strong><?php esc_html_e('Fixed-content SHA-512:', 'digitalownership-publication-verification'); ?></strong><br /><code><?php echo esc_html($candidate_sha512); ?></code></p>
+            <?php endif; ?>
+            <?php if ('draft' === $editorial_status || 'declined' === $editorial_status) : ?>
+                <?php if ('declined' === $editorial_status) : ?><div class="notice notice-warning inline"><p><?php esc_html_e('The previous administrator review was declined. Update the draft if needed, then create a new fixed version before submitting it again.', 'digitalownership-publication-verification'); ?></p></div><?php endif; ?>
+                <h3><?php esc_html_e('Step 2: Submit for administrator review', 'digitalownership-publication-verification'); ?></h3>
+                <p><?php esc_html_e('The author submits this exact private version. A WordPress administrator decides whether it may proceed to DigitalOwnership registration and publication.', 'digitalownership-publication-verification'); ?></p>
+                <?php $history_candidates = $this->public_history_candidates($post->ID, $candidate_version); ?>
+                <?php if ($history_candidates) : ?>
+                    <fieldset>
+                        <legend><strong><?php esc_html_e('Earlier public versions to disclose after publication', 'digitalownership-publication-verification'); ?></strong></legend>
+                        <?php foreach ($history_candidates as $history_candidate) : ?>
+                            <label style="display:block; margin:0.5em 0;"><input form="dovp-action-form" type="checkbox" name="dovp_previous_versions[]" value="<?php echo esc_attr($history_candidate['version']); ?>" /> <?php
+                            /* translators: 1: fixed publication version identifier. 2: UTC registration timestamp. */
+                            echo esc_html(sprintf(__('Version %1$s, registered %2$s UTC', 'digitalownership-publication-verification'), $history_candidate['version'], gmdate('Y-m-d H:i:s', strtotime($history_candidate['registeredAt']))));
+                            ?></label>
+                        <?php endforeach; ?>
+                    </fieldset>
+                    <p><label for="dovp-revision-note"><strong><?php esc_html_e('Public revision note (optional)', 'digitalownership-publication-verification'); ?></strong></label><br /><textarea form="dovp-action-form" id="dovp-revision-note" name="dovp_revision_note" rows="3" maxlength="500" style="width:100%; max-width:640px;"></textarea></p>
                 <?php endif; ?>
-            <?php endif; ?>
-            <?php if (!$manifest_completed) : ?>
-                <p>
-                    <a href="<?php echo esc_url($record['contentUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('View fixed content', 'digitalownership-publication-verification'); ?></a>
-                    <?php if (!empty($record['manifestUrl'])) : ?>
-                        &nbsp;|&nbsp;<a href="<?php echo esc_url($record['manifestUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('View evidence manifest', 'digitalownership-publication-verification'); ?></a>
+                <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_submit_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_submit_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Submit exact version for administrator review', 'digitalownership-publication-verification'); ?></button></p>
+            <?php elseif ('pending' === $editorial_status) : ?>
+                <h3><?php esc_html_e('Step 3: Administrator review', 'digitalownership-publication-verification'); ?></h3>
+                <?php if (current_user_can('manage_options')) : ?>
+                    <p><?php esc_html_e('Review the rendered fixed version and its SHA-512 fingerprint. Approval sends this exact private version to the linked DigitalOwnership account holder for registration review.', 'digitalownership-publication-verification'); ?></p>
+                    <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_approve_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_approve_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Approve and request DigitalOwnership registration', 'digitalownership-publication-verification'); ?></button> <button class="button button-secondary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_decline_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_decline_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Decline', 'digitalownership-publication-verification'); ?></button></p>
+                <?php else : ?>
+                    <p><?php esc_html_e('This exact version is waiting for a WordPress administrator to approve or decline it.', 'digitalownership-publication-verification'); ?></p>
+                <?php endif; ?>
+            <?php else : ?>
+                <h3><?php echo esc_html($content_completed ? __('Step 5: Register evidence file and publish', 'digitalownership-publication-verification') : __('Step 4: Register fixed content', 'digitalownership-publication-verification')); ?></h3>
+                <?php if (!$content_completed) : ?>
+                    <p><?php esc_html_e('The WordPress administrator approved this version. The DigitalOwnership account holder must now approve registration of this exact fixed file.', 'digitalownership-publication-verification'); ?></p>
+                    <?php if (!empty($candidate['approvalUrl']) && 'pending' === ($candidate['approvalStatus'] ?? '')) : ?><p><a class="button button-primary" href="<?php echo esc_url($candidate['approvalUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open account review of fixed version', 'digitalownership-publication-verification'); ?></a></p><?php endif; ?>
+                    <?php if ($content_approval_terminal) : ?>
+                        <div class="notice notice-warning inline"><p><?php esc_html_e('The account review expired or was declined. The fixed version and its SHA-512 have not changed.', 'digitalownership-publication-verification'); ?></p></div>
+                        <?php if (current_user_can('manage_options')) : ?>
+                            <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_request_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_request_publication_approval_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Request a new account review', 'digitalownership-publication-verification'); ?></button></p>
+                            <p class="description"><?php esc_html_e('This creates a new review link for the same fixed file. It does not repeat administrator approval or spend a credit.', 'digitalownership-publication-verification'); ?></p>
+                        <?php else : ?>
+                            <p class="description"><?php esc_html_e('Ask a WordPress administrator to request a new account review for this unchanged fixed version.', 'digitalownership-publication-verification'); ?></p>
+                        <?php endif; ?>
                     <?php endif; ?>
-                </p>
+                    <p><strong><?php esc_html_e('Registration status:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($candidate['registrationStatus'] ?? $candidate['approvalStatus'] ?? 'pending'); ?></p>
+                <?php elseif (!$manifest_completed) : ?>
+                    <p><?php esc_html_e('The fixed content is registered. The plugin has prepared the separate evidence file automatically. The account holder must approve that exact file before this version can be published.', 'digitalownership-publication-verification'); ?></p>
+                    <?php if ($manifest_preview_url && $manifest_draft_url && preg_match('/^[a-f0-9]{128}$/', $manifest_sha512)) : ?>
+                        <p><a class="button button-secondary" href="<?php echo esc_url($manifest_preview_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Read evidence file', 'digitalownership-publication-verification'); ?></a> <a href="<?php echo esc_url($manifest_draft_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open exact evidence JSON', 'digitalownership-publication-verification'); ?></a></p>
+                        <p><strong><?php esc_html_e('Evidence-file SHA-512:', 'digitalownership-publication-verification'); ?></strong><br /><code><?php echo esc_html($manifest_sha512); ?></code></p>
+                    <?php endif; ?>
+                    <?php if (!empty($candidate['manifestApprovalUrl']) && 'pending' === ($candidate['manifestApprovalStatus'] ?? '')) : ?><p><a class="button button-primary" href="<?php echo esc_url($candidate['manifestApprovalUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open account review of evidence file', 'digitalownership-publication-verification'); ?></a></p><?php endif; ?>
+                    <?php if ($manifest_approval_terminal) : ?>
+                        <div class="notice notice-warning inline"><p><?php esc_html_e('The evidence-file account review expired or was declined. The prepared evidence file and its SHA-512 have not changed.', 'digitalownership-publication-verification'); ?></p></div>
+                        <?php if (current_user_can('manage_options')) : ?>
+                            <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_request_manifest_approval&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_request_manifest_approval_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Request a new evidence-file review', 'digitalownership-publication-verification'); ?></button></p>
+                            <p class="description"><?php esc_html_e('This creates a new review link for the same evidence file. It does not change the file or spend a credit.', 'digitalownership-publication-verification'); ?></p>
+                        <?php else : ?>
+                            <p class="description"><?php esc_html_e('Ask a WordPress administrator to request a new evidence-file review for this unchanged file.', 'digitalownership-publication-verification'); ?></p>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                    <p><strong><?php esc_html_e('Evidence-file status:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($candidate['manifestRegistrationStatus'] ?? $candidate['manifestApprovalStatus'] ?? 'being prepared'); ?></p>
+                <?php else : ?>
+                    <p><?php esc_html_e('Both registrations are complete. WordPress is publishing this exact reviewed version now.', 'digitalownership-publication-verification'); ?></p>
+                <?php endif; ?>
+                <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_refresh_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_refresh_publication_approval_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Refresh registration and publication status', 'digitalownership-publication-verification'); ?></a></p>
             <?php endif; ?>
+        <?php elseif ($active_record) : ?>
+            <hr />
+            <div class="notice notice-success inline"><p><strong><?php esc_html_e('Registration complete.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Readers see the registered fixed version. Create a new private fixed version before releasing a revision.', 'digitalownership-publication-verification'); ?></p></div>
+            <p><a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_generate_canonical&post_id=' . $post->ID), 'dovp_generate_canonical_' . $post->ID)); ?>"><?php esc_html_e('Create a private fixed revision', 'digitalownership-publication-verification'); ?></a> <a class="button button-secondary" href="<?php echo esc_url($this->verification_url($active_record['manifestUrl'])); ?>" target="_blank" rel="noopener"><?php esc_html_e('Verify live version', 'digitalownership-publication-verification'); ?></a></p>
+        <?php else : ?>
+            <p><a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_generate_canonical&post_id=' . $post->ID), 'dovp_generate_canonical_' . $post->ID)); ?>"><?php esc_html_e('Step 1: Create private fixed version of saved content', 'digitalownership-publication-verification'); ?></a></p>
+            <p class="description"><?php esc_html_e('This does not spend a credit and does not publish the post. It creates the exact saved version that the author can submit for administrator review.', 'digitalownership-publication-verification'); ?></p>
         <?php endif; ?>
         <?php if ($records) : ?>
             <?php
@@ -589,7 +616,7 @@ final class DOVP_Plugin {
             <ul>
                 <?php foreach ($version_history as $history_version => $history_record) : ?>
                     <?php
-                    if (!is_array($history_record)) continue;
+                    if (!is_array($history_record) || !$this->record_is_publicly_released($history_record)) continue;
                     $created_at = sanitize_text_field($history_record['createdAt'] ?? '');
                     $created_timestamp = false === strtotime($created_at) ? 0 : strtotime($created_at);
                     $registration = is_array($history_record['registrationResult'] ?? null) ? $history_record['registrationResult'] : array();
@@ -619,6 +646,75 @@ final class DOVP_Plugin {
                 <?php endforeach; ?>
             </ul>
         <?php endif; ?>
+        <?php
+    }
+
+    private function render_registration_progress($candidate, $active_record, $candidate_changed) {
+        $has_candidate = is_array($candidate);
+        $editorial_status = $has_candidate ? sanitize_key($candidate['editorialStatus'] ?? 'draft') : '';
+        $content_complete = $has_candidate && 'completed' === ($candidate['registrationStatus'] ?? '') && !empty($candidate['registrationResult']);
+        $manifest_complete = $has_candidate && !empty($candidate['manifestUrl']);
+        $steps = array();
+
+        if ($active_record && !$has_candidate) {
+            $steps = array(
+                array('title' => __('Create fixed version', 'digitalownership-publication-verification'), 'status' => __('Complete', 'digitalownership-publication-verification'), 'detail' => __('The published page is rendered from this fixed version.', 'digitalownership-publication-verification')),
+                array('title' => __('Submit for administrator review', 'digitalownership-publication-verification'), 'status' => __('Complete', 'digitalownership-publication-verification'), 'detail' => __('The author submitted this exact version.', 'digitalownership-publication-verification')),
+                array('title' => __('Administrator review', 'digitalownership-publication-verification'), 'status' => __('Complete', 'digitalownership-publication-verification'), 'detail' => __('A WordPress administrator approved this version.', 'digitalownership-publication-verification')),
+                array('title' => __('Register fixed content', 'digitalownership-publication-verification'), 'status' => __('Complete', 'digitalownership-publication-verification'), 'detail' => __('The DigitalOwnership account holder approved the fixed file.', 'digitalownership-publication-verification')),
+                array('title' => __('Register evidence file and publish', 'digitalownership-publication-verification'), 'status' => __('Complete', 'digitalownership-publication-verification'), 'detail' => __('Readers can now verify the public version.', 'digitalownership-publication-verification')),
+            );
+        } elseif ($candidate_changed) {
+            $steps = array(
+                array('title' => __('Create fixed version', 'digitalownership-publication-verification'), 'status' => __('Action needed', 'digitalownership-publication-verification'), 'detail' => __('The saved post changed, so create a new fixed version.', 'digitalownership-publication-verification')),
+                array('title' => __('Submit for administrator review', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('Available after a new fixed version is created.', 'digitalownership-publication-verification')),
+                array('title' => __('Administrator review', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('Available after the author submits the fixed version.', 'digitalownership-publication-verification')),
+                array('title' => __('Register fixed content', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('Available after administrator approval.', 'digitalownership-publication-verification')),
+                array('title' => __('Register evidence file and publish', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('Available after fixed-content registration.', 'digitalownership-publication-verification')),
+            );
+        } elseif (!$has_candidate) {
+            $steps = array(
+                array('title' => __('Create fixed version', 'digitalownership-publication-verification'), 'status' => __('Action needed', 'digitalownership-publication-verification'), 'detail' => __('Create the exact saved version for review.', 'digitalownership-publication-verification')),
+                array('title' => __('Submit for administrator review', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('The author submits the fixed version.', 'digitalownership-publication-verification')),
+                array('title' => __('Administrator review', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('A WordPress administrator reviews the submitted fixed version.', 'digitalownership-publication-verification')),
+                array('title' => __('Register fixed content', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('The account holder approves the fixed file.', 'digitalownership-publication-verification')),
+                array('title' => __('Register evidence file and publish', 'digitalownership-publication-verification'), 'status' => __('Waiting', 'digitalownership-publication-verification'), 'detail' => __('The account holder approves the evidence file before publication.', 'digitalownership-publication-verification')),
+            );
+        } else {
+            $submitted = !in_array($editorial_status, array('draft', 'declined'), true);
+            $administrator_approved = in_array($editorial_status, array('approved', 'published'), true);
+            $steps = array(
+                array('title' => __('Create fixed version', 'digitalownership-publication-verification'), 'status' => __('Complete', 'digitalownership-publication-verification'), 'detail' => __('A private fixed version is ready for review.', 'digitalownership-publication-verification')),
+                array(
+                    'title' => __('Submit for administrator review', 'digitalownership-publication-verification'),
+                    'status' => $submitted ? __('Complete', 'digitalownership-publication-verification') : __('Action needed', 'digitalownership-publication-verification'),
+                    'detail' => $submitted ? __('The author submitted this exact version.', 'digitalownership-publication-verification') : __('The author must submit this fixed version for review.', 'digitalownership-publication-verification'),
+                ),
+                array(
+                    'title' => __('Administrator review', 'digitalownership-publication-verification'),
+                    'status' => $administrator_approved ? __('Complete', 'digitalownership-publication-verification') : ('pending' === $editorial_status ? __('Action needed', 'digitalownership-publication-verification') : __('Waiting', 'digitalownership-publication-verification')),
+                    'detail' => $administrator_approved ? __('A WordPress administrator approved this version.', 'digitalownership-publication-verification') : ('pending' === $editorial_status ? __('Waiting for a WordPress administrator to approve or decline.', 'digitalownership-publication-verification') : __('Available after the author submits the fixed version.', 'digitalownership-publication-verification')),
+                ),
+                array(
+                    'title' => __('Register fixed content', 'digitalownership-publication-verification'),
+                    'status' => $content_complete ? __('Complete', 'digitalownership-publication-verification') : ($administrator_approved ? __('Action needed', 'digitalownership-publication-verification') : __('Waiting', 'digitalownership-publication-verification')),
+                    'detail' => $content_complete ? __('The fixed file is registered.', 'digitalownership-publication-verification') : ($administrator_approved ? __('Waiting for the DigitalOwnership account holder to approve the fixed file.', 'digitalownership-publication-verification') : __('Available after administrator approval.', 'digitalownership-publication-verification')),
+                ),
+                array(
+                    'title' => __('Register evidence file and publish', 'digitalownership-publication-verification'),
+                    'status' => $manifest_complete ? __('Complete', 'digitalownership-publication-verification') : ($content_complete ? __('Action needed', 'digitalownership-publication-verification') : __('Waiting', 'digitalownership-publication-verification')),
+                    'detail' => $manifest_complete ? __('WordPress is completing publication of this exact version.', 'digitalownership-publication-verification') : ($content_complete ? __('Waiting for the account holder to approve the evidence file.', 'digitalownership-publication-verification') : __('Available after fixed-content registration.', 'digitalownership-publication-verification')),
+                ),
+            );
+        }
+        ?>
+        <hr />
+        <p><strong><?php esc_html_e('Registration progress', 'digitalownership-publication-verification'); ?></strong></p>
+        <ol>
+            <?php foreach ($steps as $step) : ?>
+                <li><strong><?php echo esc_html($step['title']); ?>:</strong> <?php echo esc_html($step['status']); ?>. <?php echo esc_html($step['detail']); ?></li>
+            <?php endforeach; ?>
+        </ol>
         <?php
     }
 
@@ -673,6 +769,19 @@ final class DOVP_Plugin {
                     inside.innerHTML = payload.html;
                     lastState = payload.state;
                 }
+
+                // The background workflow may publish a pending post while
+                // Gutenberg still has the previous status in browser state.
+                // Reload only a clean editor, so no local draft changes are lost.
+                var currentStatus = editor && 'function' === typeof editor.getEditedPostAttribute
+                    ? editor.getEditedPostAttribute('status')
+                    : '';
+                var isDirty = editor && 'function' === typeof editor.isEditedPostDirty
+                    ? editor.isEditedPostDirty()
+                    : true;
+                if ('publish' === payload.postStatus && 'publish' !== currentStatus && !isDirty) {
+                    window.location.reload();
+                }
             }).catch(function () {
                 // The editor remains usable if this status refresh fails.
             }).finally(function () {
@@ -705,17 +814,15 @@ JS;
         if (!current_user_can('edit_post', $post_id)) {
             return;
         }
-        if (!$this->is_public_publication($post)) {
+        if (!$this->is_public_publication($post) && !$this->has_active_prepublication_candidate($post_id)) {
             $this->archive_publication_evidence($post_id);
-            return;
         }
 
         update_post_meta($post_id, self::META_ENABLED, !empty($_POST['dovp_enabled']) ? '1' : '0');
-        update_post_meta($post_id, self::META_FORMAT, 'json');
     }
 
     public function remove_evidence_for_non_public_post($post_id, $post_after, $post_before) {
-        if (!$this->is_public_publication($post_after)) {
+        if (!$this->is_public_publication($post_after) && !$this->has_active_prepublication_candidate($post_id)) {
             $this->archive_publication_evidence($post_id);
         }
     }
@@ -760,7 +867,6 @@ JS;
         $this->remove_storage_directory($post_directory);
 
         delete_post_meta($post_id, self::META_ENABLED);
-        delete_post_meta($post_id, self::META_FORMAT);
         delete_post_meta($post_id, self::META_VERSION);
         delete_post_meta($post_id, self::META_VERSIONS);
     }
@@ -777,7 +883,7 @@ JS;
             'no_found_rows' => true,
         ));
         foreach ($post_ids as $post_id) {
-            if (!$this->is_public_publication(get_post($post_id))) {
+            if (!$this->is_public_publication(get_post($post_id)) && !$this->has_active_prepublication_candidate($post_id)) {
                 $this->archive_publication_evidence($post_id);
             }
         }
@@ -819,10 +925,9 @@ JS;
         if (!$post || !in_array($post->post_type, array('post', 'page'), true)) {
             $this->redirect_with_notice($post_id, 'invalid-post');
         }
-        if (!$this->is_public_publication($post)) {
-            wp_die(esc_html__('Publication evidence can be created only for a publicly published post or page without password protection.', 'digitalownership-publication-verification'), 403);
+        if (!$this->can_create_candidate_version($post)) {
+            wp_die(esc_html__('A fixed version can be created only for a saved post or page without password protection.', 'digitalownership-publication-verification'), 403);
         }
-        $format = 'json';
         // Route values are normalized by WordPress, so use a URL-safe lowercase
         // identifier for both the stored record and its public artifact URL.
         $version = sanitize_key(gmdate('Y-m-d\\THis\\Z'));
@@ -831,17 +936,15 @@ JS;
             $this->redirect_with_notice($post_id, 'storage-error');
         }
 
-        $content_path = trailingslashit($directory) . 'content.' . $format;
+        $content_path = trailingslashit($directory) . 'content.json';
         if (file_exists($content_path)) {
             $this->redirect_with_notice($post_id, 'already-exists');
         }
 
         $body_html = $this->snapshot_post_body($post);
-        $content_url = $this->artifact_url($post_id, $version, 'content', $format);
+        $content_url = $this->artifact_url($post_id, $version, 'content', 'json');
         $image_evidence = $this->fixed_image_evidence($post_id, $version, $body_html);
-        $artifact = 'json' === $format
-            ? $this->canonical_json($post, $version, $content_url, $image_evidence)
-            : $this->canonical_markdown($post, $version, $content_url, $body_html);
+        $artifact = $this->canonical_json($post, $version, $content_url, $image_evidence);
 
         if (false === file_put_contents($content_path, $artifact, LOCK_EX)) {
             $this->redirect_with_notice($post_id, 'storage-error');
@@ -850,20 +953,114 @@ JS;
         $records = $this->publication_records($post_id);
         $record = array(
             'version' => $version,
-            'format' => $format,
+            'format' => 'json',
             'contentPath' => $this->relative_storage_path($content_path),
             'contentUrl' => $content_url,
             'assetSources' => $image_evidence['sources'],
             'sourceModifiedGmt' => get_post_modified_time('c', true, $post),
+            'sourceRevisionHash' => $this->post_revision_hash($post),
+            'publicationMode' => $this->is_public_publication($post) ? 'revision' : 'prepublication',
+            'editorialStatus' => 'draft',
+            'reviewToken' => wp_generate_password(32, false, false),
+            'publiclyReleased' => false,
             'createdAt' => gmdate('c'),
         );
         $supersedes = $this->previous_registered_version($post_id);
         if ($supersedes) $record['supersedes'] = $supersedes;
         $records[$version] = $record;
         update_post_meta($post_id, self::META_VERSIONS, $records);
-        update_post_meta($post_id, self::META_VERSION, $version);
+        update_post_meta($post_id, self::META_CANDIDATE_VERSION, $version);
         update_post_meta($post_id, self::META_ENABLED, '1');
         $this->redirect_with_notice($post_id, 'generated');
+    }
+
+    public function submit_editorial_review() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
+        if (!$post_id || !current_user_can('edit_post', $post_id)) {
+            wp_die(esc_html__('You cannot submit this publication for administrator review.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_submit_editorial_review_' . $post_id . '_' . $version);
+
+        $post = get_post($post_id);
+        list($stored_version, $record) = $this->record_for_version($post_id, $version);
+        if (!$post || !$this->is_candidate_record($record) || !$this->snapshot_matches_post($post, $record)) {
+            $this->redirect_with_notice($post_id, 'candidate-outdated');
+        }
+        if (!get_option(self::OPTION_SITE_TOKEN, '')) {
+            $this->redirect_with_notice($post_id, 'approval-unavailable');
+        }
+
+        $record['editorialStatus'] = 'pending';
+        $record['editorialRequestedAt'] = gmdate('c');
+        $record['editorialRequestedBy'] = get_current_user_id();
+        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- check_admin_referer() above verifies this request.
+        $requested_versions = isset($_POST['dovp_previous_versions']) && is_array($_POST['dovp_previous_versions']) ? array_map('sanitize_key', wp_unslash($_POST['dovp_previous_versions'])) : array();
+        $record['requestedPreviousVersions'] = $this->selected_public_history_versions($post_id, $stored_version, $requested_versions);
+        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- check_admin_referer() above verifies this request.
+        $record['requestedRevisionNote'] = isset($_POST['dovp_revision_note']) ? sanitize_textarea_field(wp_unslash($_POST['dovp_revision_note'])) : '';
+        $records = $this->publication_records($post_id);
+        $records[$stored_version] = $record;
+        update_post_meta($post_id, self::META_VERSIONS, $records);
+
+        if ('prepublication' === ($record['publicationMode'] ?? '') && 'draft' === $post->post_status) {
+            wp_update_post(array('ID' => $post_id, 'post_status' => 'pending'));
+        }
+        $this->redirect_with_notice($post_id, 'editorial-review-requested');
+    }
+
+    public function approve_editorial_review() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
+        if (!$post_id || !current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot approve this publication for registration.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_approve_editorial_review_' . $post_id . '_' . $version);
+
+        $post = get_post($post_id);
+        list($stored_version, $record) = $this->record_for_version($post_id, $version);
+        $token = get_option(self::OPTION_SITE_TOKEN, '');
+        if (!$post || !$token || !$this->is_candidate_record($record) || 'pending' !== ($record['editorialStatus'] ?? '') || !$this->snapshot_matches_post($post, $record)) {
+            $this->redirect_with_notice($post_id, 'candidate-outdated');
+        }
+
+        $record['editorialStatus'] = 'approved';
+        $record['editorialDecidedAt'] = gmdate('c');
+        $record['editorialDecidedBy'] = get_current_user_id();
+        if (!$this->create_content_approval($post_id, $stored_version, $record, $token)) {
+            $this->redirect_with_notice($post_id, 'approval-failed');
+        }
+        $records = $this->publication_records($post_id);
+        $records[$stored_version] = $record;
+        update_post_meta($post_id, self::META_VERSIONS, $records);
+        $this->schedule_publication_workflow($post_id, $stored_version, 15);
+        $this->redirect_with_notice($post_id, 'editorial-approved');
+    }
+
+    public function decline_editorial_review() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
+        if (!$post_id || !current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot decline this publication review.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_decline_editorial_review_' . $post_id . '_' . $version);
+
+        $post = get_post($post_id);
+        list($stored_version, $record) = $this->record_for_version($post_id, $version);
+        if (!$post || !$this->is_candidate_record($record) || 'pending' !== ($record['editorialStatus'] ?? '')) {
+            $this->redirect_with_notice($post_id, 'candidate-outdated');
+        }
+
+        $record['editorialStatus'] = 'declined';
+        $record['editorialDecidedAt'] = gmdate('c');
+        $record['editorialDecidedBy'] = get_current_user_id();
+        $records = $this->publication_records($post_id);
+        $records[$stored_version] = $record;
+        update_post_meta($post_id, self::META_VERSIONS, $records);
+        if ('prepublication' === ($record['publicationMode'] ?? '') && 'pending' === $post->post_status) {
+            wp_update_post(array('ID' => $post_id, 'post_status' => 'draft'));
+        }
+        $this->redirect_with_notice($post_id, 'editorial-declined');
     }
 
     public function add_admin_pages() {
@@ -880,11 +1077,16 @@ JS;
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This value selects a predefined notice and performs no action.
         $notice = isset($_GET['dovp_notice']) ? sanitize_key(wp_unslash($_GET['dovp_notice'])) : '';
         $messages = array(
+            'generated' => array('success', __('Private fixed version created. Review it, then submit it for administrator review.', 'digitalownership-publication-verification')),
+            'editorial-review-requested' => array('success', __('Administrator review requested. A WordPress administrator can now approve or decline this exact private version.', 'digitalownership-publication-verification')),
+            'editorial-approved' => array('success', __('Administrator approval recorded. The DigitalOwnership account holder can now review and approve registration of the exact fixed version.', 'digitalownership-publication-verification')),
+            'editorial-declined' => array('warning', __('Administrator review declined. Nothing was registered or published. The author can continue editing and submit a new fixed version.', 'digitalownership-publication-verification')),
+            'candidate-outdated' => array('warning', __('The saved post no longer matches the private fixed version. Create a new fixed version before submitting or approving it.', 'digitalownership-publication-verification')),
             'approval-requested' => array('success', __('Review request sent. The DigitalOwnership account holder can read the fixed publication version and approve or decline its exact fingerprint. Return here afterwards to refresh the status.', 'digitalownership-publication-verification')),
             'approval-refreshed' => array('success', __('Approval status refreshed.', 'digitalownership-publication-verification')),
             'manifest-prepared' => array('success', __('Public manifest draft created. Review the public email and SHA-512 in the evidence box, then request a separate account approval.', 'digitalownership-publication-verification')),
             'manifest-approval-requested' => array('success', __('Public evidence file review requested. The DigitalOwnership account holder can approve or decline its exact fingerprint. Return here afterwards to refresh the status.', 'digitalownership-publication-verification')),
-            'manifest-published' => array('success', __('Manifest registration completed and the public verification link is now active.', 'digitalownership-publication-verification')),
+            'manifest-published' => array('success', __('Both registrations completed. This exact approved version is now public with its verification link.', 'digitalownership-publication-verification')),
             'approval-unavailable' => array('error', __('The WordPress site is not connected, or this fixed version is unavailable.', 'digitalownership-publication-verification')),
             'approval-failed' => array('error', __('DigitalOwnership could not create the approval request. Check the linked account, available credits, and service status.', 'digitalownership-publication-verification')),
             'approval-refresh-failed' => array('error', __('DigitalOwnership could not retrieve the approval status. Check the linked account connection and try again.', 'digitalownership-publication-verification')),
@@ -938,13 +1140,13 @@ JS;
             <?php endif; ?>
             <hr />
             <h2><?php esc_html_e('Who does what', 'digitalownership-publication-verification'); ?></h2>
-            <p><?php esc_html_e('This workflow separates publishing preparation from credit-spending approval.', 'digitalownership-publication-verification'); ?></p>
+            <p><?php esc_html_e('This workflow separates writing, administrator approval, credit-spending approval, and publication.', 'digitalownership-publication-verification'); ?></p>
             <ul style="list-style:disc; margin-left:1.5em;">
-                <li><?php esc_html_e('WordPress Editors write, save, and create fixed versions. They can request account approval.', 'digitalownership-publication-verification'); ?></li>
-                <li><?php esc_html_e('WordPress Administrators connect or remove this site from DigitalOwnership.', 'digitalownership-publication-verification'); ?></li>
-                <li><?php esc_html_e('The DigitalOwnership account holder reviews the fixed content and fingerprint, then approves registrations that spend credits.', 'digitalownership-publication-verification'); ?></li>
+                <li><?php esc_html_e('WordPress Editors write, save, create a private fixed version, and submit it for administrator review.', 'digitalownership-publication-verification'); ?></li>
+                <li><?php esc_html_e('WordPress Administrators connect or remove this site from DigitalOwnership and approve or decline the submitted fixed version.', 'digitalownership-publication-verification'); ?></li>
+                <li><?php esc_html_e('The DigitalOwnership account holder reviews the exact fixed file and later its evidence file, then approves registrations that spend credits.', 'digitalownership-publication-verification'); ?></li>
             </ul>
-            <p class="description"><?php esc_html_e('Use an organisation-owned publishing account, such as publications@company.example. Keep its access and any pipeline credentials with the responsible senior publisher or administrator. Editors do not need a DigitalOwnership account.', 'digitalownership-publication-verification'); ?></p>
+            <p class="description"><?php esc_html_e('After both registrations complete, WordPress publishes the exact approved fixed version. Use an organisation-owned publishing account, such as publications@company.example. Editors do not need a DigitalOwnership account.', 'digitalownership-publication-verification'); ?></p>
         </div>
         <?php
     }
@@ -980,29 +1182,46 @@ JS;
     public function request_publication_approval() {
         $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
         $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
-        if (!$post_id || !current_user_can('edit_post', $post_id)) wp_die(esc_html__('You cannot request publication approval.', 'digitalownership-publication-verification'), 403);
+        if (!$post_id || !current_user_can('manage_options')) wp_die(esc_html__('You cannot request publication approval.', 'digitalownership-publication-verification'), 403);
         check_admin_referer('dovp_request_publication_approval_' . $post_id . '_' . $version);
         list($stored_version, $record) = $this->record_for_version($post_id, $version);
         $token = get_option(self::OPTION_SITE_TOKEN, '');
+        $post = get_post($post_id);
+        if (!$token || !$post || !$this->is_candidate_record($record) || 'approved' !== ($record['editorialStatus'] ?? '') || !$this->snapshot_matches_post($post, $record)) {
+            $this->redirect_with_notice($post_id, 'approval-unavailable');
+        }
+        if (!$this->create_content_approval($post_id, $stored_version, $record, $token)) {
+            $this->redirect_with_notice($post_id, 'approval-failed');
+        }
+        $records = $this->publication_records($post_id);
+        $records[$stored_version] = $record;
+        update_post_meta($post_id, self::META_VERSIONS, $records);
+        $this->schedule_publication_workflow($post_id, $stored_version, 15);
+        $this->redirect_with_notice($post_id, 'approval-requested');
+    }
+
+    private function create_content_approval($post_id, $version, &$record, $token) {
         $path = is_array($record) ? $this->safe_storage_path($record['contentPath'] ?? '') : false;
-        if (!$token || !$path || !is_readable($path)) $this->redirect_with_notice($post_id, 'approval-unavailable');
+        if (!$token || !$path || !is_readable($path)) {
+            return false;
+        }
         $approval_terminal = in_array($record['approvalStatus'] ?? '', array('expired', 'rejected'), true);
         $approval_attempt = sanitize_text_field($record['approvalAttempt'] ?? '');
         if (!$approval_attempt || $approval_terminal) {
             $approval_attempt = wp_generate_uuid4();
         }
-        $response = wp_remote_post(self::CREDIT_SERVICE_URL . '/approvals', array('timeout' => 20, 'headers' => array('Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json'), 'body' => wp_json_encode(array('sourceHash' => hash_file('sha512', $path), 'hashScope' => 'digitalownership-exact-file-v1', 'registryAddress' => self::REGISTRY_ADDRESS, 'chainId' => self::CHAIN_ID, 'approvalMode' => 'required', 'immediateExecutionAcknowledged' => true, 'idempotencyKey' => 'wordpress-' . $post_id . '-' . $stored_version . '-' . $approval_attempt))));
+        $response = wp_remote_post(self::CREDIT_SERVICE_URL . '/approvals', array('timeout' => 20, 'headers' => array('Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json'), 'body' => wp_json_encode(array('sourceHash' => hash_file('sha512', $path), 'hashScope' => 'digitalownership-exact-file-v1', 'registryAddress' => self::REGISTRY_ADDRESS, 'chainId' => self::CHAIN_ID, 'approvalMode' => 'required', 'immediateExecutionAcknowledged' => true, 'idempotencyKey' => 'wordpress-' . $post_id . '-' . $version . '-' . $approval_attempt))));
         $body = is_wp_error($response) ? null : json_decode(wp_remote_retrieve_body($response), true);
         $status = is_wp_error($response) ? 0 : wp_remote_retrieve_response_code($response);
-        if (201 !== $status || empty($body['approval']['id']) || empty($body['approval']['approvalUrl'])) $this->redirect_with_notice($post_id, 'approval-failed');
+        if (201 !== $status || empty($body['approval']['id']) || empty($body['approval']['approvalUrl'])) {
+            return false;
+        }
         $record['approvalId'] = $body['approval']['id'];
         $record['approvalUrl'] = $this->publication_approval_url($body['approval']['approvalUrl'], $post_id, $record);
         $record['approvalStatus'] = $body['approval']['status'] ?? 'pending';
         $record['approvalAttempt'] = $approval_attempt;
         unset($record['registrationId'], $record['registrationStatus'], $record['registrationError'], $record['registrationResult']);
-        $records = $this->publication_records($post_id); $records[$stored_version] = $record; update_post_meta($post_id, self::META_VERSIONS, $records);
-        $this->schedule_publication_workflow($post_id, $stored_version, 15);
-        $this->redirect_with_notice($post_id, 'approval-requested');
+        return true;
     }
 
     public function refresh_publication_approval() {
@@ -1012,7 +1231,33 @@ JS;
         check_admin_referer('dovp_refresh_publication_approval_' . $post_id . '_' . $version);
         $this->process_publication_workflow($post_id, $version);
         list($stored_version, $record) = $this->record_for_version($post_id, $version);
-        $this->redirect_with_notice($post_id, !empty($record['manifestUrl']) ? 'manifest-published' : 'approval-refreshed');
+        $this->redirect_with_notice($post_id, $this->record_is_publicly_released($record) && !empty($record['manifestUrl']) ? 'manifest-published' : 'approval-refreshed');
+    }
+
+    public function request_manifest_approval() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
+        if (!$post_id || !current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot request evidence-file review.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_request_manifest_approval_' . $post_id . '_' . $version);
+
+        $post = get_post($post_id);
+        list($stored_version, $record) = $this->record_for_version($post_id, $version);
+        $token = get_option(self::OPTION_SITE_TOKEN, '');
+        $content_completed = 'completed' === ($record['registrationStatus'] ?? '') && !empty($record['registrationResult']);
+        $terminal = in_array($record['manifestApprovalStatus'] ?? '', array('expired', 'rejected'), true);
+        if (!$token || !$post || !$this->is_candidate_record($record) || 'approved' !== ($record['editorialStatus'] ?? '') || !$content_completed || empty($record['manifestDraft']) || !$terminal || !$this->snapshot_matches_post($post, $record)) {
+            $this->redirect_with_notice($post_id, 'approval-unavailable');
+        }
+        if (!$this->create_manifest_approval($post_id, $stored_version, $record, $token)) {
+            $this->redirect_with_notice($post_id, 'approval-failed');
+        }
+        $records = $this->publication_records($post_id);
+        $records[$stored_version] = $record;
+        update_post_meta($post_id, self::META_VERSIONS, $records);
+        $this->schedule_publication_workflow($post_id, $stored_version, 15);
+        $this->redirect_with_notice($post_id, 'manifest-approval-requested');
     }
 
     public function process_publication_workflow($post_id, $version) {
@@ -1020,16 +1265,34 @@ JS;
         $version = sanitize_key($version);
         list($stored_version, $record) = $this->record_for_version($post_id, $version);
         $token = get_option(self::OPTION_SITE_TOKEN, '');
+        $post = get_post($post_id);
         if (!$post_id || !$stored_version || !is_array($record) || !$token) {
             return;
         }
 
         $this->ensure_manifest_draft_token($record);
         $this->refresh_approval_and_registration($token, $post_id, $record, 'content');
-        if (!empty($record['manifestDraft']) && empty($record['manifestApprovalId']) && empty($record['manifestRegistrationId'])) {
+        $ready_to_release = $post
+            && $this->is_candidate_record($record)
+            && 'approved' === ($record['editorialStatus'] ?? '')
+            && $this->snapshot_matches_post($post, $record);
+        if ($ready_to_release && 'completed' === ($record['registrationStatus'] ?? '') && empty($record['manifestDraft'])) {
+            $this->prepare_manifest_draft(
+                $post_id,
+                $stored_version,
+                $record,
+                $token,
+                is_array($record['requestedPreviousVersions'] ?? null) ? $record['requestedPreviousVersions'] : array(),
+                sanitize_textarea_field($record['requestedRevisionNote'] ?? '')
+            );
+        }
+        if ($ready_to_release && !empty($record['manifestDraft']) && empty($record['manifestApprovalId']) && empty($record['manifestRegistrationId'])) {
             $this->create_manifest_approval($post_id, $stored_version, $record, $token);
         }
         $this->refresh_approval_and_registration($token, $post_id, $record, 'manifest');
+        if ($ready_to_release && !empty($record['manifestUrl'])) {
+            $this->release_completed_version($post_id, $stored_version, $record);
+        }
 
         $records = $this->publication_records($post_id);
         $records[$stored_version] = $record;
@@ -1037,7 +1300,7 @@ JS;
 
         $content_open = in_array($record['approvalStatus'] ?? '', array('pending', 'approved'), true) && 'completed' !== ($record['registrationStatus'] ?? '');
         $manifest_open = !empty($record['manifestDraft']) && in_array($record['manifestApprovalStatus'] ?? '', array('pending', 'approved'), true) && empty($record['manifestUrl']);
-        if ($content_open || $manifest_open) {
+        if ($ready_to_release && ($content_open || $manifest_open)) {
             $this->schedule_publication_workflow($post_id, $stored_version, 30);
         }
     }
@@ -1138,7 +1401,7 @@ JS;
         $record['manifestPublishedAt'] = $manifest['publishedAt'];
         $record['previousVersions'] = $previous_versions;
         $record['revisionNote'] = $revision_note;
-        unset($record['manifestApprovalId'], $record['manifestApprovalUrl'], $record['manifestApprovalStatus'], $record['manifestRegistrationId'], $record['manifestRegistrationStatus'], $record['manifestRegistrationError'], $record['manifestRegistrationResult']);
+        unset($record['manifestApprovalId'], $record['manifestApprovalUrl'], $record['manifestApprovalStatus'], $record['manifestApprovalAttempt'], $record['manifestRegistrationId'], $record['manifestRegistrationStatus'], $record['manifestRegistrationError'], $record['manifestRegistrationResult']);
         return true;
     }
 
@@ -1148,7 +1411,12 @@ JS;
         if (!$contents || !$expected_hash || !hash_equals($expected_hash, hash('sha512', $contents))) {
             return false;
         }
-        $response = wp_remote_post(self::CREDIT_SERVICE_URL . '/approvals', array('timeout' => 20, 'headers' => array('Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json'), 'body' => wp_json_encode(array('sourceHash' => $expected_hash, 'hashScope' => 'digitalownership-exact-file-v1', 'registryAddress' => self::REGISTRY_ADDRESS, 'chainId' => self::CHAIN_ID, 'approvalMode' => 'required', 'immediateExecutionAcknowledged' => true, 'idempotencyKey' => 'wordpress-manifest-' . $post_id . '-' . $version))));
+        $approval_terminal = in_array($record['manifestApprovalStatus'] ?? '', array('expired', 'rejected'), true);
+        $approval_attempt = sanitize_text_field($record['manifestApprovalAttempt'] ?? '');
+        if (!$approval_attempt || $approval_terminal) {
+            $approval_attempt = wp_generate_uuid4();
+        }
+        $response = wp_remote_post(self::CREDIT_SERVICE_URL . '/approvals', array('timeout' => 20, 'headers' => array('Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json'), 'body' => wp_json_encode(array('sourceHash' => $expected_hash, 'hashScope' => 'digitalownership-exact-file-v1', 'registryAddress' => self::REGISTRY_ADDRESS, 'chainId' => self::CHAIN_ID, 'approvalMode' => 'required', 'immediateExecutionAcknowledged' => true, 'idempotencyKey' => 'wordpress-manifest-' . $post_id . '-' . $version . '-' . $approval_attempt))));
         $body = is_wp_error($response) ? null : json_decode(wp_remote_retrieve_body($response), true);
         if (201 !== (is_wp_error($response) ? 0 : wp_remote_retrieve_response_code($response)) || empty($body['approval']['id']) || empty($body['approval']['approvalUrl'])) {
             return false;
@@ -1156,6 +1424,8 @@ JS;
         $record['manifestApprovalId'] = $body['approval']['id'];
         $record['manifestApprovalUrl'] = $this->publication_approval_url($body['approval']['approvalUrl'], $post_id, $record, 'manifest');
         $record['manifestApprovalStatus'] = sanitize_key($body['approval']['status'] ?? 'pending');
+        $record['manifestApprovalAttempt'] = $approval_attempt;
+        unset($record['manifestRegistrationId'], $record['manifestRegistrationStatus'], $record['manifestRegistrationError'], $record['manifestRegistrationResult']);
         return true;
     }
 
@@ -1164,128 +1434,6 @@ JS;
         if (!wp_next_scheduled('dovp_process_publication_workflow', $args)) {
             wp_schedule_single_event(time() + max(5, absint($delay)), 'dovp_process_publication_workflow', $args);
         }
-    }
-
-    public function prepare_manifest() {
-        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
-        $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
-        if (!$post_id || !current_user_can('edit_post', $post_id)) wp_die(esc_html__('You cannot prepare this manifest.', 'digitalownership-publication-verification'), 403);
-        check_admin_referer('dovp_prepare_manifest_' . $post_id . '_' . $version);
-
-        list($stored_version, $record) = $this->record_for_version($post_id, $version);
-        $token = get_option(self::OPTION_SITE_TOKEN, '');
-        $content_path = is_array($record) ? $this->safe_storage_path($record['contentPath'] ?? '') : false;
-        $registration = is_array($record['registrationResult'] ?? null) ? $record['registrationResult'] : array();
-        if (!$token || !$content_path || !is_readable($content_path) || 'completed' !== ($record['registrationStatus'] ?? '') || !$this->valid_public_registration($registration)) {
-            $this->redirect_with_notice($post_id, 'manifest-unavailable');
-        }
-
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- check_admin_referer() above verifies this request.
-        $selected_versions = isset($_POST['dovp_previous_versions']) && is_array($_POST['dovp_previous_versions']) ? array_map('sanitize_key', wp_unslash($_POST['dovp_previous_versions'])) : array();
-        $previous_versions = $this->selected_public_history_versions($post_id, $stored_version, $selected_versions);
-        $revision_note = isset($_POST['dovp_revision_note']) ? sanitize_textarea_field(wp_unslash($_POST['dovp_revision_note'])) : '';
-        if (!$this->prepare_manifest_draft($post_id, $stored_version, $record, $token, $previous_versions, $revision_note)) {
-            $this->redirect_with_notice($post_id, 'manifest-failed');
-        }
-        if (!$this->create_manifest_approval($post_id, $stored_version, $record, $token)) {
-            $this->redirect_with_notice($post_id, 'manifest-failed');
-        }
-        $records = $this->publication_records($post_id);
-        $records[$stored_version] = $record;
-        update_post_meta($post_id, self::META_VERSIONS, $records);
-        $this->schedule_publication_workflow($post_id, $stored_version, 15);
-        $this->redirect_with_notice($post_id, 'manifest-approval-requested');
-    }
-
-    public function request_manifest_approval() {
-        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
-        $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
-        if (!$post_id || !current_user_can('edit_post', $post_id)) wp_die(esc_html__('You cannot request manifest approval.', 'digitalownership-publication-verification'), 403);
-        check_admin_referer('dovp_request_manifest_approval_' . $post_id . '_' . $version);
-
-        list($stored_version, $record) = $this->record_for_version($post_id, $version);
-        $token = get_option(self::OPTION_SITE_TOKEN, '');
-        $contents = is_array($record) ? (string) ($record['manifestDraft'] ?? '') : '';
-        $expected_hash = strtolower(sanitize_text_field($record['manifestDraftSha512'] ?? ''));
-        if (!$token || !$contents || !hash_equals($expected_hash, hash('sha512', $contents))) {
-            $this->redirect_with_notice($post_id, 'manifest-unavailable');
-        }
-        $response = wp_remote_post(self::CREDIT_SERVICE_URL . '/approvals', array('timeout' => 20, 'headers' => array('Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json'), 'body' => wp_json_encode(array('sourceHash' => $expected_hash, 'hashScope' => 'digitalownership-exact-file-v1', 'registryAddress' => self::REGISTRY_ADDRESS, 'chainId' => self::CHAIN_ID, 'approvalMode' => 'required', 'immediateExecutionAcknowledged' => true, 'idempotencyKey' => 'wordpress-manifest-' . $post_id . '-' . $stored_version . '-' . floor(time() / 300)))));
-        $body = is_wp_error($response) ? null : json_decode(wp_remote_retrieve_body($response), true);
-        $status = is_wp_error($response) ? 0 : wp_remote_retrieve_response_code($response);
-        if (201 !== $status || empty($body['approval']['id']) || empty($body['approval']['approvalUrl'])) $this->redirect_with_notice($post_id, 'manifest-failed');
-        $record['manifestApprovalId'] = $body['approval']['id'];
-        $record['manifestApprovalUrl'] = $this->publication_approval_url($body['approval']['approvalUrl'], $post_id, $record, 'manifest');
-        $record['manifestApprovalStatus'] = sanitize_key($body['approval']['status'] ?? 'pending');
-        $records = $this->publication_records($post_id);
-        $records[$stored_version] = $record;
-        update_post_meta($post_id, self::META_VERSIONS, $records);
-        $this->schedule_publication_workflow($post_id, $stored_version, 15);
-        $this->redirect_with_notice($post_id, 'manifest-approval-requested');
-    }
-
-    public function render_attach_manifest_page() {
-        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This read-only admin screen checks edit capability before rendering.
-        $post_id = isset($_GET['post_id']) ? absint($_GET['post_id']) : 0;
-        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This read-only admin screen checks edit capability before rendering.
-        $version = isset($_GET['version']) ? sanitize_key(wp_unslash($_GET['version'])) : '';
-        list($stored_version, $record) = $this->record_for_version($post_id, $version);
-        if (!$post_id || !current_user_can('edit_post', $post_id) || !is_array($record)) {
-            wp_die(esc_html__('The requested publication version is unavailable.', 'digitalownership-publication-verification'), 404);
-        }
-        ?>
-        <div class="wrap">
-            <h1><?php esc_html_e('Attach registered publication manifest', 'digitalownership-publication-verification'); ?></h1>
-            <p><?php esc_html_e('Create and register the manifest with the DigitalOwnership CLI first. Upload only the completed public manifest, never a private receipt.', 'digitalownership-publication-verification'); ?></p>
-            <p><strong><?php esc_html_e('Fixed-content URL:', 'digitalownership-publication-verification'); ?></strong><br /><code><?php echo esc_html($record['contentUrl']); ?></code></p>
-            <form method="post" enctype="multipart/form-data" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                <?php wp_nonce_field('dovp_attach_manifest_' . $post_id . '_' . $version); ?>
-                <input type="hidden" name="action" value="dovp_attach_manifest" />
-                <input type="hidden" name="post_id" value="<?php echo esc_attr($post_id); ?>" />
-                <input type="hidden" name="version" value="<?php echo esc_attr($stored_version); ?>" />
-                <p><input type="file" name="dovp_manifest" accept="application/json,.json" required /></p>
-                <p><button class="button button-primary" type="submit"><?php esc_html_e('Attach manifest', 'digitalownership-publication-verification'); ?></button></p>
-            </form>
-        </div>
-        <?php
-    }
-
-    public function attach_manifest() {
-        $post_id = isset($_POST['post_id']) ? absint($_POST['post_id']) : 0;
-        $version = isset($_POST['version']) ? sanitize_key(wp_unslash($_POST['version'])) : '';
-        if (!$post_id || !$version || !current_user_can('edit_post', $post_id)) {
-            wp_die(esc_html__('You cannot attach this manifest.', 'digitalownership-publication-verification'), 403);
-        }
-        check_admin_referer('dovp_attach_manifest_' . $post_id . '_' . $version);
-        list($stored_version, $record) = $this->record_for_version($post_id, $version);
-        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- File metadata is validated below after check_admin_referer().
-        $upload = $_FILES['dovp_manifest'] ?? null;
-        if (!is_array($record) || !is_array($upload) || UPLOAD_ERR_OK !== (int) $upload['error'] || (int) $upload['size'] > 1024 * 1024) {
-            $this->redirect_with_notice($post_id, 'manifest-invalid');
-        }
-
-        // This is an exact-file registration. Validate the JSON structure but
-        // retain the uploaded bytes so its registered SHA-512 remains valid.
-        $contents = file_get_contents($upload['tmp_name']);
-        if (false === $contents) {
-            $this->redirect_with_notice($post_id, 'manifest-invalid');
-        }
-        $manifest = json_decode($contents, true);
-        $content_path = $this->safe_storage_path($record['contentPath'] ?? '');
-        if (!$this->manifest_matches_content($manifest, $record['contentUrl'], $content_path)) {
-            $this->redirect_with_notice($post_id, 'manifest-mismatch');
-        }
-
-        $directory = $this->version_directory($post_id, $stored_version);
-        if (!wp_mkdir_p($directory) || false === file_put_contents(trailingslashit($directory) . 'manifest.json', $contents, LOCK_EX)) {
-            $this->redirect_with_notice($post_id, 'storage-error');
-        }
-        $record['manifestPath'] = $this->relative_storage_path(trailingslashit($directory) . 'manifest.json');
-        $record['manifestUrl'] = $this->artifact_url($post_id, $stored_version, 'manifest', 'json');
-        $records = $this->publication_records($post_id);
-        $records[$stored_version] = $record;
-        update_post_meta($post_id, self::META_VERSIONS, $records);
-        $this->redirect_with_notice($post_id, 'manifest-attached');
     }
 
     public function render_canonical_content($content) {
@@ -1307,7 +1455,7 @@ JS;
             return $this->diagnostic_content($content, 'canonical-file-unreadable');
         }
         $source = file_get_contents($path);
-        $rendered = 'json' === $record['format'] ? $this->render_json_content($source) : $this->render_markdown_content($source);
+        $rendered = $this->render_json_content($source);
         if (null === $rendered) {
             return $this->diagnostic_content($content, 'canonical-file-invalid');
         }
@@ -1322,7 +1470,7 @@ JS;
         if (!$record) {
             return;
         }
-        $type = 'md' === $record['format'] ? 'text/markdown' : 'application/json';
+        $type = 'application/json';
         printf("\n<link rel=\"alternate\" type=\"%s\" href=\"%s\" title=\"Canonical publication content\" />\n", esc_attr($type), esc_url($record['contentUrl']));
         if (!empty($record['manifestUrl'])) {
             printf("<link rel=\"provenance\" type=\"application/json\" href=\"%s\" title=\"DigitalOwnership publication manifest\" />\n", esc_url($record['manifestUrl']));
@@ -1374,7 +1522,66 @@ JS;
         }
         $version = get_post_meta($post_id, self::META_VERSION, true);
         $records = $this->publication_records($post_id);
-        return $version && isset($records[$version]) ? $records[$version] : null;
+        $record = $version && isset($records[$version]) ? $records[$version] : null;
+        return $this->record_is_publicly_released($record) ? $record : null;
+    }
+
+    private function candidate_record($post_id) {
+        $version = get_post_meta($post_id, self::META_CANDIDATE_VERSION, true);
+        $records = $this->publication_records($post_id);
+        $record = $version && isset($records[$version]) ? $records[$version] : null;
+        return $this->is_candidate_record($record) ? $record : null;
+    }
+
+    private function is_candidate_record($record) {
+        return is_array($record)
+            && !$this->record_is_publicly_released($record)
+            && in_array($record['publicationMode'] ?? '', array('prepublication', 'revision'), true);
+    }
+
+    private function record_is_publicly_released($record) {
+        return is_array($record) && !empty($record['publiclyReleased']);
+    }
+
+    private function has_active_prepublication_candidate($post_id) {
+        $record = $this->candidate_record($post_id);
+        return $record && 'prepublication' === ($record['publicationMode'] ?? '');
+    }
+
+    private function can_create_candidate_version($post) {
+        return $post
+            && in_array($post->post_type, array('post', 'page'), true)
+            && in_array($post->post_status, array('draft', 'pending', 'private', 'publish'), true)
+            && '' === (string) $post->post_password;
+    }
+
+    private function post_revision_hash($post) {
+        if (!$post) {
+            return '';
+        }
+        return hash('sha256', wp_json_encode(array(
+            'title' => (string) $post->post_title,
+            'content' => (string) $post->post_content,
+        ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
+
+    private function snapshot_matches_post($post, $record) {
+        $expected = is_array($record) ? sanitize_text_field($record['sourceRevisionHash'] ?? '') : '';
+        return $expected && $post && hash_equals($expected, $this->post_revision_hash($post));
+    }
+
+    private function review_token_valid($record) {
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- An unguessable per-version token authorizes private account review.
+        $provided = sanitize_text_field(wp_unslash($_GET['dovp_review'] ?? ''));
+        $expected = is_array($record) ? sanitize_text_field($record['reviewToken'] ?? '') : '';
+        return $provided && $expected && hash_equals($expected, $provided);
+    }
+
+    private function manifest_draft_token_valid($record) {
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- An unguessable per-version token authorizes this private manifest draft.
+        $provided = sanitize_text_field(wp_unslash($_GET['dovp_draft'] ?? ''));
+        $expected = is_array($record) ? sanitize_text_field($record['manifestDraftToken'] ?? '') : '';
+        return $provided && $expected && !empty($record['manifestDraft']) && hash_equals($expected, $provided);
     }
 
     private function private_archive($post_id) {
@@ -1385,6 +1592,9 @@ JS;
     private function previous_registered_version($post_id) {
         $candidates = array();
         foreach ($this->publication_records($post_id) as $record) {
+            if (!$this->record_is_publicly_released($record)) {
+                continue;
+            }
             $path = is_array($record) ? $this->safe_storage_path($record['contentPath'] ?? '') : false;
             $bytes = $path && is_readable($path) ? file_get_contents($path) : false;
             $reference = $this->registered_version_reference($record, $bytes);
@@ -1405,6 +1615,9 @@ JS;
         $candidates = array();
         foreach ($this->publication_records($post_id) as $stored_version => $record) {
             if (!is_array($record) || sanitize_key($stored_version) === sanitize_key($exclude_version)) {
+                continue;
+            }
+            if (!$this->record_is_publicly_released($record)) {
                 continue;
             }
             if (empty($record['contentUrl']) || empty($record['manifestUrl'])) {
@@ -1569,88 +1782,12 @@ JS;
         return $path && 0 === strpos($path, $root . DIRECTORY_SEPARATOR) && is_file($path) ? $path : false;
     }
 
-    private function canonical_markdown($post, $version, $content_url, $body_html) {
-        $front_matter = array(
-            'schema: digitalownership-wordpress-canonical-content-v1',
-            'publication: ' . $this->yaml_value(get_the_title($post)),
-            'version: ' . $this->yaml_value($version),
-            'page_url: ' . $this->yaml_value(get_permalink($post)),
-            'canonical_content_url: ' . $this->yaml_value($content_url),
-            'published_at: ' . $this->yaml_value(get_post_time('c', true, $post)),
-            'modified_at: ' . $this->yaml_value(get_post_modified_time('c', true, $post)),
-        );
-        return "---\n" . implode("\n", $front_matter) . "\n---\n\n# " . get_the_title($post) . "\n\n" . $this->html_to_markdown($body_html) . "\n";
-    }
-
-    private function yaml_value($value) {
-        return '"' . str_replace(array('\\', '"'), array('\\\\', '\\"'), (string) $value) . '"';
-    }
-
-    private function html_to_markdown($html) {
-        $html = preg_replace_callback('/<h([2-6])[^>]*>(.*?)<\\/h\\1>/is', static function ($matches) {
-            return "\n\n" . str_repeat('#', (int) $matches[1]) . ' ' . wp_strip_all_tags($matches[2]) . "\n\n";
-        }, $html);
-        $html = preg_replace_callback('/<li[^>]*>(.*?)<\\/li>/is', static function ($matches) {
-            return "- " . trim(wp_strip_all_tags($matches[1])) . "\n";
-        }, $html);
-        $html = preg_replace_callback('/<a[^>]+href=["\\\']([^"\\\']+)["\\\'][^>]*>(.*?)<\\/a>/is', static function ($matches) {
-            $url = esc_url_raw($matches[1]);
-            return $url ? '[' . trim(wp_strip_all_tags($matches[2])) . '](' . $url . ')' : trim(wp_strip_all_tags($matches[2]));
-        }, $html);
-        $html = preg_replace('/<\\/?(p|div|ul|ol|br)[^>]*>/i', "\n", $html);
-        $text = html_entity_decode(wp_strip_all_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        $text = preg_replace("/\\n{3,}/", "\n\n", $text);
-        return trim($text);
-    }
-
     private function render_json_content($source) {
         $data = json_decode($source, true);
-        if (!is_array($data) || !in_array($data['schema'] ?? '', array('digitalownership-wordpress-canonical-content-v1', 'digitalownership-wordpress-canonical-content-v2'), true)) {
+        if (!is_array($data) || 'digitalownership-wordpress-canonical-content-v2' !== ($data['schema'] ?? '')) {
             return null;
         }
         return isset($data['content']['body']) && is_string($data['content']['body']) ? wp_kses_post($data['content']['body']) : null;
-    }
-
-    private function render_markdown_content($source) {
-        $body = preg_replace('/^---\\R.*?\\R---\\R*/s', '', $source, 1);
-        $lines = preg_split('/\\R/', trim($body));
-        $output = '';
-        $paragraph = array();
-        $in_list = false;
-        $flush = static function () use (&$output, &$paragraph) {
-            if ($paragraph) {
-                $output .= '<p>' . DOVP_Plugin::inline_markdown(implode(' ', $paragraph)) . '</p>';
-                $paragraph = array();
-            }
-        };
-        foreach ($lines as $line) {
-            if (preg_match('/^(#{1,6})\\s+(.+)$/', $line, $matches)) {
-                $flush();
-                if ($in_list) { $output .= '</ul>'; $in_list = false; }
-                $level = strlen($matches[1]);
-                $output .= '<h' . $level . '>' . self::inline_markdown($matches[2]) . '</h' . $level . '>';
-            } elseif (preg_match('/^-\\s+(.+)$/', $line, $matches)) {
-                $flush();
-                if (!$in_list) { $output .= '<ul>'; $in_list = true; }
-                $output .= '<li>' . self::inline_markdown($matches[1]) . '</li>';
-            } elseif ('' === trim($line)) {
-                $flush();
-                if ($in_list) { $output .= '</ul>'; $in_list = false; }
-            } else {
-                $paragraph[] = $line;
-            }
-        }
-        $flush();
-        if ($in_list) { $output .= '</ul>'; }
-        return wp_kses_post($output);
-    }
-
-    private static function inline_markdown($text) {
-        $escaped = esc_html($text);
-        return preg_replace_callback('/\\[([^\\]]+)\\]\\(([^)]+)\\)/', static function ($matches) {
-            $url = esc_url($matches[2], array('http', 'https'));
-            return $url ? '<a href="' . $url . '" rel="noopener">' . esc_html($matches[1]) . '</a>' : esc_html($matches[1]);
-        }, $escaped);
     }
 
     private function verification_panel($record) {
@@ -1763,7 +1900,7 @@ JS;
     private function publication_approval_url($approval_url, $post_id, $record, $artifact = 'content') {
         $approval_url = esc_url_raw($approval_url);
         $is_manifest = 'manifest' === $artifact;
-        $file_url = $is_manifest ? $this->manifest_draft_url($post_id, $record) : (is_array($record) ? esc_url_raw($record['contentUrl'] ?? '') : '');
+        $file_url = $is_manifest ? $this->manifest_draft_url($post_id, $record) : $this->content_review_url($record);
         $preview_url = $is_manifest ? $this->manifest_draft_preview_url($post_id, $record) : $this->fixed_content_preview_url($record);
         if (!$approval_url || !$file_url || !$preview_url) {
             return $approval_url;
@@ -1778,8 +1915,14 @@ JS;
     }
 
     private function fixed_content_preview_url($record) {
-        $content_url = is_array($record) ? esc_url_raw($record['contentUrl'] ?? '') : '';
+        $content_url = $this->content_review_url($record);
         return $content_url ? add_query_arg('dovp_preview', '1', $content_url) : '';
+    }
+
+    private function content_review_url($record) {
+        $content_url = is_array($record) ? esc_url_raw($record['contentUrl'] ?? '') : '';
+        $token = is_array($record) ? sanitize_text_field($record['reviewToken'] ?? '') : '';
+        return $content_url && $token ? add_query_arg('dovp_review', rawurlencode($token), $content_url) : $content_url;
     }
 
     private function manifest_draft_url($post_id, $record) {
@@ -1806,7 +1949,9 @@ JS;
 
     private function workflow_url($post_id, $record) {
         $version = is_array($record) ? sanitize_key($record['version'] ?? '') : '';
-        return $version ? $this->artifact_url($post_id, $version, 'workflow', 'json') : '';
+        $url = $version ? $this->artifact_url($post_id, $version, 'workflow', 'json') : '';
+        $token = is_array($record) ? sanitize_text_field($record['reviewToken'] ?? '') : '';
+        return $url && $token && $this->is_candidate_record($record) ? add_query_arg('dovp_review', rawurlencode($token), $url) : $url;
     }
 
     private function valid_public_registration($registration) {
@@ -1837,6 +1982,28 @@ JS;
         $record['manifestPath'] = $this->relative_storage_path($final_path);
         $record['manifestUrl'] = $this->artifact_url($post_id, $version, 'manifest', 'json');
         $record['manifestRegistrationResult'] = $this->public_registration_result($registration_request['result'] ?? array());
+        return true;
+    }
+
+    private function release_completed_version($post_id, $version, &$record) {
+        $post = get_post($post_id);
+        if (!$post || !$this->is_candidate_record($record) || !$this->snapshot_matches_post($post, $record) || empty($record['manifestUrl'])) {
+            return false;
+        }
+
+        if ('prepublication' === ($record['publicationMode'] ?? '') && !$this->is_public_publication($post)) {
+            $published = wp_update_post(array('ID' => $post_id, 'post_status' => 'publish'), true);
+            if (is_wp_error($published)) {
+                $record['publicationError'] = sanitize_text_field($published->get_error_message());
+                return false;
+            }
+        }
+
+        $record['publiclyReleased'] = true;
+        $record['editorialStatus'] = 'published';
+        $record['releasedAt'] = gmdate('c');
+        update_post_meta($post_id, self::META_VERSION, $version);
+        delete_post_meta($post_id, self::META_CANDIDATE_VERSION);
         return true;
     }
 

@@ -35,6 +35,12 @@ if (!license.includes('GNU General Public License') || !license.includes('either
 if (!implementation.includes("wp_add_privacy_policy_content")) {
   fail("plugin must provide WordPress privacy-policy suggested text");
 }
+if (implementation.includes("echo '<style>")) {
+  fail("preview styles must be loaded through the WordPress stylesheet queue");
+}
+if (!implementation.includes("wp_enqueue_style($handle)") || !implementation.includes("wp_print_styles(array($handle))")) {
+  fail("standalone preview pages must enqueue and print their stylesheet");
+}
 for (const requiredDisclosure of [
   "== External service and privacy ==",
   "https://digitalownership.squaredant.com/terms",
@@ -49,11 +55,11 @@ for (const requiredDisclosure of [
 if (!implementation.includes("header('Access-Control-Allow-Origin: https://digitalownership.squaredant.com');")) {
   fail("publication artifacts must allow the independent verifier origin");
 }
-if (!implementation.includes("file_put_contents(trailingslashit($directory) . 'manifest.json', $contents, LOCK_EX)")) {
-  fail("uploaded manifests must be stored as their original bytes");
+if (!implementation.includes("file_put_contents($final_path, $contents, LOCK_EX)")) {
+  fail("completed manifests must be stored as their exact approved bytes");
 }
-if (implementation.includes("file_put_contents(trailingslashit($directory) . 'manifest.json', wp_json_encode($manifest")) {
-  fail("uploaded manifests must not be reformatted before storage");
+if (implementation.includes("file_put_contents($final_path, wp_json_encode($manifest")) {
+  fail("completed manifests must not be reformatted before storage");
 }
 if (!implementation.includes("return add_query_arg('manifest', $manifest_url, $base);")) {
   fail("the verification link must supply the manifest URL");
@@ -73,11 +79,23 @@ if (!implementation.includes('id="dovp-action-form"') || !implementation.include
 if (implementation.includes('dovp_register_publication') || implementation.includes('id="dovp-format"')) {
   fail("the editor must expose only the account-reviewed registration path and fixed JSON format");
 }
-if (!implementation.includes("$format = 'json';")) {
+if (!implementation.includes("content.json") || implementation.includes("canonical_markdown")) {
   fail("new WordPress publication versions must use JSON");
 }
-if (!implementation.includes("if ($record && !$source_changed)")) {
-  fail("changed posts must not expose obsolete fixed-version approval controls");
+for (const requiredWorkflowPart of [
+  "META_CANDIDATE_VERSION",
+  "submit_editorial_review",
+  "approve_editorial_review",
+  "decline_editorial_review",
+  "snapshot_matches_post",
+  "release_completed_version",
+  "'post_status' => 'publish'",
+  "review_token_valid",
+  "current_user_can('manage_options')",
+]) {
+  if (!implementation.includes(requiredWorkflowPart)) {
+    fail(`pre-publication editorial workflow must include ${requiredWorkflowPart}`);
+  }
 }
 if (!implementation.includes("send_fixed_content_preview") || !implementation.includes("dovp_preview")) {
   fail("account review must use a version-specific rendered fixed-content preview");
@@ -112,13 +130,32 @@ if (!implementation.includes("META_PRIVATE_ARCHIVE") || !implementation.includes
 if (!implementation.includes('refresh_evidence_box_after_editor_save') || !implementation.includes('register_editor_status_route') || !implementation.includes("digitalownership-publication/v1")) {
   fail("the Gutenberg evidence box must refresh through its authenticated status endpoint");
 }
-if (!implementation.includes("Registration complete") || !implementation.includes("Verify as a reader")) {
+if (!implementation.includes("'postStatus' => sanitize_key($post->post_status)") || !implementation.includes("window.location.reload()") || !implementation.includes("editor.isEditedPostDirty")) {
+  fail("a clean Gutenberg editor must synchronize after background publication without discarding draft edits");
+}
+if (!implementation.includes("Registration complete.") || !implementation.includes("Verify live version")) {
   fail("the editor must show a clear completed-registration state");
 }
-if (!implementation.includes('A previously verified version was withdrawn when this post was no longer public.')) {
-  fail("republished posts must warn when no active verified version remains");
+if (!implementation.includes("render_registration_progress") || !implementation.includes("Register evidence file and publish")) {
+  fail("the editor must show the complete registration-progress overview");
 }
-if (!implementation.includes('This checkbox does not register anything.') || !implementation.includes('Step 2: Create fixed version of saved content')) {
+if (!implementation.includes("Submit for administrator review") || implementation.includes("Submit for editorial approval")) {
+  fail("the author submission step must clearly distinguish administrator review from approval");
+}
+
+if (!implementation.includes("Fixed-content SHA-512:") || !implementation.includes("candidate_sha512")) {
+  fail("the candidate workflow must retain the fixed-content SHA-512 across review steps");
+}
+if (!implementation.includes("Evidence-file SHA-512:") || !implementation.includes("manifestDraftSha512")) {
+  fail("the evidence-file review step must show the distinct manifest SHA-512");
+}
+if (!implementation.includes("Request a new account review") || !implementation.includes("dovp_request_publication_approval")) {
+  fail("an administrator must be able to replace an expired fixed-content account review");
+}
+if (!implementation.includes("Request a new evidence-file review") || !implementation.includes("dovp_request_manifest_approval") || !implementation.includes("manifestApprovalAttempt")) {
+  fail("an administrator must be able to replace an expired evidence-file account review");
+}
+if (!implementation.includes('This checkbox does not register anything.') || !implementation.includes('Create private fixed version of saved content')) {
   fail("the editor must distinguish verification-link opt-in from fixed-version creation");
 }
 if (!implementation.includes('Publication version history') || !implementation.includes("gmdate('Y-m-d H:i:s'")) {

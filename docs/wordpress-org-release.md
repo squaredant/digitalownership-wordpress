@@ -17,11 +17,15 @@ does not replace WordPress.org's manual review.
    owner must decide whether and how to include that text in its published
    privacy policy.
 5. Confirm the plugin does not contact DigitalOwnership until an administrator
-   connects an account or an editor explicitly requests a registration.
+   connects an account, an editor submits an exact saved version, and a
+   WordPress administrator approves that editorial request.
 6. Confirm the publisher has deliberately enabled the per-post setting:
    **Use a fixed, verifiable version of this publication and show its public
    verification link.** This is the site owner's opt-in to the public
    DigitalOwnership link; the plugin does not add a site-wide credit or link.
+7. Confirm that drafts and pending posts are not publicly accessible through
+   any generated content, manifest, image, or workflow URL. They must remain
+   private until both account-holder approvals have completed.
 
 ## First submission
 

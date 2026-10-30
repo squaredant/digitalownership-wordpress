@@ -1,0 +1,43 @@
+body {
+  max-width: 760px;
+  margin: 3rem auto;
+  padding: 0 1.25rem;
+  color: #1d2a24;
+  font: 18px/1.6 Georgia, serif;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+a {
+  color: #006e5a;
+}
+
+.dovp-fixed-note,
+.dovp-note {
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  color: #52615a;
+  border-bottom: 1px solid #d6ddd8;
+  font: 14px/1.45 system-ui, sans-serif;
+}
+
+dl {
+  font: 16px/1.5 system-ui, sans-serif;
+}
+
+dt {
+  margin-top: 1rem;
+  font-weight: 700;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+code {
+  font: 13px/1.4 ui-monospace, monospace;
+}

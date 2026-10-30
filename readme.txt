@@ -4,7 +4,7 @@ Tags: provenance, publishing, verification, blockchain, content integrity
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.0
-Stable tag: 0.8.0
+Stable tag: 0.9.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -16,15 +16,17 @@ This is beta software while it is prepared for WordPress.org review. Test the
 publication and account-approval workflow with your own DigitalOwnership
 account before relying on it for a production publishing process.
 
-DigitalOwnership Publication Verification creates a fixed JSON version of selected WordPress posts and pages. When a site owner enables it for a publication, the published body is rendered from that version and includes a public verification link. The writer requests review of the fixed version. Once it is registered, the writer can choose earlier public versions to disclose and add an optional public revision note before requesting review of the separate public evidence file.
+DigitalOwnership Publication Verification creates a private fixed JSON version of a selected WordPress post or page before it is released. An Editor submits that exact version for review, a WordPress Administrator approves or declines it, and the linked DigitalOwnership account holder approves the two registrations that spend credits. Only after both registrations complete does WordPress publish the exact approved version with its public verification link.
 
-WordPress Editors can prepare content and request approval. Use an organisation-owned publishing account, such as `publications@company.example`, for the linked DigitalOwnership account. The account holder reviews a version-specific rendered preview and decides whether to approve or decline; no credit is spent when it is declined.
+For a revision to an already public article, the existing registered version remains live while the replacement is reviewed. The author can choose earlier public versions to disclose and add an optional public revision note when submitting the replacement.
+
+Use an organisation-owned publishing account, such as `publications@company.example`, for the linked DigitalOwnership account. The account holder reviews a version-specific rendered preview and exact JSON file before deciding whether to approve each registration; no credit is spent when an account review is declined.
 
 The plugin does not upload your content to DigitalOwnership. It stores a site-local connection token in WordPress so approved registration requests can be made without placing a reusable DigitalOwnership credential in post metadata or browser code.
 
 == External service and privacy ==
 
-This plugin uses the DigitalOwnership service at https://digitalownership.squaredant.com/ only after a WordPress Administrator connects the site to a DigitalOwnership account, or an Editor requests a registration that the account holder approves.
+This plugin uses the DigitalOwnership service at https://digitalownership.squaredant.com/ only after a WordPress Administrator connects the site to a DigitalOwnership account, approves a submitted fixed version, and the DigitalOwnership account holder approves registration.
 
 For an approved registration, the plugin sends DigitalOwnership the SHA-512 fingerprint of the fixed JSON file, its hash scope, blockchain registry details, and a request identifier. It does not send the post body, local image bytes, attachments, or other original file bytes for registration.
 
@@ -36,15 +38,30 @@ DigitalOwnership's [Terms of Service](https://digitalownership.squaredant.com/te
 
 1. Upload the plugin ZIP through **Plugins > Add New > Upload Plugin**, then activate it. Alternatively, upload the extracted folder to `/wp-content/plugins/`.
 2. As a WordPress Administrator, open **Settings > DigitalOwnership Verification** and select **Connect DigitalOwnership account**. Use the organisation-owned publishing account.
-3. Publish a post or page, then save it. Creating a fixed version always uses the last saved content; unsaved editor changes are not included.
-4. In the DigitalOwnership publication evidence box, select **Use a fixed, verifiable version of this publication and show its public verification link**, then choose **Update**. This enables the public verification link; it does not register content.
-5. Select **Step 2: Create fixed version of saved content**.
-6. The writer requests account review from the evidence box. The DigitalOwnership account holder reads the version-specific preview, checks the SHA-512, and approves or declines.
-7. After the fixed content is registered, choose any earlier public versions readers should be able to open and verify, optionally add a public revision note, then request review of the separate public evidence file. The account holder reviews that exact file before it is registered. The evidence panel refreshes automatically while the editor is open.
+3. Write and save a draft post or page. Creating a fixed version always uses the last saved content; unsaved editor changes are not included.
+4. In the DigitalOwnership publication evidence box, select **Use a fixed, verifiable version of this publication and show its public verification link**, then save the post. This enables the workflow; it does not register or publish content.
+5. Select **Create private fixed version of saved content**, inspect the rendered preview, and submit the exact version for administrator review. For a revision, choose any earlier public versions to disclose and optionally add a public revision note before submitting.
+6. A WordPress Administrator reviews the rendered fixed version and SHA-512 fingerprint, then approves or declines it. Declining does not register or publish anything; the author can continue editing the draft.
+7. After administrative approval, the DigitalOwnership account holder reviews and approves the fixed-content registration. Once it completes, the plugin automatically prepares the separate public evidence file for the account holder to review and approve.
+8. When both registrations complete, WordPress publishes the exact approved version. For a revision, the earlier registered version remains live until the replacement completes. The evidence panel refreshes automatically while the editor is open.
 
-Only publicly published, non-password-protected posts and pages can create or serve publication evidence. Moving a post to draft, private, or trash removes its public fixed-content and evidence files and disables their public URLs. Exact bytes are retained in a private WordPress archive that only administrators can download. If the post later becomes public again, create and register a new fixed version; archived or withdrawn evidence cannot be selected or republished as a public historical version. Permanent deletion removes that archive too.
+If a fixed-content or evidence-file account-review link expires or is declined before registration, a WordPress Administrator can request a new review. This creates a new review link for the unchanged file and its existing SHA-512; it does not repeat administrator approval or spend a credit.
+
+Private fixed versions are not served publicly. The account-holder review uses an unguessable, version-specific review link for the rendered preview, exact JSON, and declared local images. The public fixed-content JSON, evidence file, image routes, and verification link become available only after registration completes and the version is released.
+
+Moving a previously public post to draft, private, or trash removes its public fixed-content and evidence files and disables their public URLs. Exact bytes are retained in a private WordPress archive that only administrators can download. If the post later becomes public again, create and register a new fixed version; archived or withdrawn evidence cannot be selected or republished as a public historical version. Permanent deletion removes that archive too.
 
 == Changelog ==
+
+= 0.9.0 =
+* Add private fixed-version review before first publication.
+* Require WordPress administrator approval before a DigitalOwnership registration request is created.
+* Publish a new article only after the account holder approves both the fixed-content and evidence-file registrations.
+* Keep the existing registered version live while a replacement is reviewed and registered.
+* Remove the former Markdown, manual-manifest, and public-first workflows. Versions created by earlier beta releases are not supported after this upgrade.
+
+= 0.8.1 =
+* Load standalone fixed-content and evidence-file preview styles through the WordPress stylesheet queue.
 
 = 0.8.0 =
 * Refresh the editor evidence panel from an authenticated WordPress status endpoint, independent of Gutenberg save-event timing.

@@ -1,7 +1,8 @@
-# WordPress.org Release Checklist
+# WordPress.org Release Guide
 
-This checklist prepares a review ZIP for the WordPress.org Plugin Directory. It
-does not replace WordPress.org's manual review.
+This guide prepares a release for the WordPress.org Plugin Directory and its
+SVN release repository. Keep development in Git; use WordPress.org SVN only
+for completed releases.
 
 ## Before creating the ZIP
 
@@ -27,35 +28,20 @@ does not replace WordPress.org's manual review.
    any generated content, manifest, image, or workflow URL. They must remain
    private until both account-holder approvals have completed.
 
-## First submission
+## WordPress.org Listing
 
-Submit from a WordPress.org account that uses a maintained SquaredAnt company
-email address. WordPress.org treats the account identity as part of its
-trademark and ownership review. The suggested display name is
-**DigitalOwnership Publication Verification**. WordPress.org determines the
-final plugin slug at submission, so do not promise a particular directory URL
-until the review has accepted it.
+Use the WordPress.org plugin slug assigned in the acceptance email. It defines
+the public directory URL and SVN repository; it is not necessarily the GitHub
+repository name. Keep the directory listing description, `readme.txt`, and the
+actual service behavior aligned.
 
-Upload the production ZIP at:
+The plugin uses DigitalOwnership as an external service. `readme.txt` must
+continue to disclose when the service is contacted, which data is sent, the
+Terms and Privacy Notice URLs, and that a completed public manifest contains
+the account registration email. Do not describe the plugin as legal compliance,
+legal proof, or a guarantee of authorship or content quality.
 
-```text
-https://wordpress.org/plugins/developers/add/
-```
-
-Use this concise submission description:
-
-> Create fixed, independently verifiable versions of selected WordPress posts
-> and pages. The plugin keeps original content on the publisher's site,
-> registers only SHA-512 fingerprints after separate account-owner approval,
-> and gives readers a public verification link for completed versions.
-
-The service is a permitted SaaS dependency, but the review must be able to see
-the disclosure in `readme.txt`: when the service is contacted, which data is
-sent, the Terms and Privacy Notice URLs, and that a completed public manifest
-contains the account registration email. Do not describe the plugin as legal
-compliance, legal proof, or a guarantee of authorship or content quality.
-
-## Build the review ZIP
+## Build The Release ZIP
 
 From this plugin directory, run:
 
@@ -91,27 +77,43 @@ Plugin Check can also be run from **Tools > Plugin Check** in WordPress. Review
 every error before submitting. Warnings need a documented decision: fix them,
 or explain why they do not apply.
 
-## After approval
+## Publish Version 1.0.0 Through SVN
 
-WordPress.org provides an SVN release repository with `trunk/`, `tags/`, and
-`assets/`. Keep development in Git. Use SVN only for reviewed release files:
+Use the plugin slug WordPress.org assigned in its acceptance email. It is not
+necessarily the GitHub repository name. Set it once below, then run the
+commands from the plugin repository root.
 
-1. Copy the contents of the release ZIP into `trunk/`, without its enclosing
-   plugin directory.
-2. Copy `trunk/` to `tags/<version>` using `svn copy`.
-3. Add optional directory artwork to `assets/` separately; do not put those
-   images inside the installable plugin ZIP.
-4. Commit the completed release once. WordPress.org builds the public download
-   and update metadata from the SVN repository.
+```sh
+WP_ORG_SLUG='replace-with-the-accepted-wordpress-org-slug'
+SVN_ROOT="$HOME/wordpress-org/$WP_ORG_SLUG"
+RELEASE_DIR="$(mktemp -d)/digitalownership-publication-verification"
 
-## Submit and maintain
+svn checkout "https://plugins.svn.wordpress.org/$WP_ORG_SLUG/" "$SVN_ROOT"
+node tools/check-release.mjs
+node tools/build-release.mjs
+unzip -q dist/digitalownership-publication-verification-1.0.0.zip -d "$(dirname "$RELEASE_DIR")"
+rsync -a --delete "$RELEASE_DIR/" "$SVN_ROOT/trunk/"
 
-Submit the ZIP through the WordPress.org plugin submission form using the
-organisation's maintained WordPress.org account. After approval, WordPress.org
-provides an SVN repository. Put current development code in `trunk/`, copy each
-released version to `tags/<version>/`, and keep `readme.txt`'s `Stable tag`
-equal to the released tag.
+svn add --force "$SVN_ROOT/trunk"
+svn copy "$SVN_ROOT/trunk" "$SVN_ROOT/tags/1.0.0"
+svn status "$SVN_ROOT"
+svn commit "$SVN_ROOT" -m "Release version 1.0.0"
+```
 
-Re-run this checklist whenever the plugin starts sending different data to
+Use the WordPress.org username that submitted the plugin, preserving its exact
+capitalisation. WordPress.org supports a dedicated SVN password in account
+settings; use that rather than placing a password in a command or script.
+
+`trunk/` must contain the *contents* of the release ZIP, not its enclosing
+plugin directory and not the ZIP itself. `svn copy` creates the release tag
+from that exact trunk content. Add directory icons, banner images, and
+screenshots to `assets/` separately; they do not belong in the plugin ZIP.
+
+For later releases, update the version metadata and `Stable tag`, replace
+`trunk/` with the newly built ZIP contents, create `tags/<new-version>` with
+`svn copy`, and commit the two changes together. WordPress.org can take time
+to rebuild the public download and update metadata after a commit.
+
+Re-run this release guide whenever the plugin starts sending different data to
 DigitalOwnership, changes public evidence fields, or changes its approval and
 permissions model.

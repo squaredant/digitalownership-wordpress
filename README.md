@@ -1,20 +1,19 @@
 # DigitalOwnership Publication Verification for WordPress
 
-> **Beta software:** This plugin is being prepared for WordPress.org review.
-> Test its publication and account-approval workflow with your own
-> DigitalOwnership account before relying on it in production.
+This is the stable WordPress.org release of the DigitalOwnership publication
+verification plugin. Test its publication and account-approval workflow with
+your own DigitalOwnership account before relying on it in a production process.
 
 This WordPress plugin is the first publishing integration for the
 DigitalOwnership web-publication verification protocol.
 
 ## Upgrade Compatibility
 
-Version `0.9.0` deliberately replaces the earlier beta workflows. It supports
-only private JSON review followed by administrator approval and two
-account-holder approvals. Markdown fixed files, manually attached manifests,
-and versions created by prior beta releases are not supported after upgrade.
-Do not install this release on a site that needs to keep earlier beta evidence
-available.
+Version `1.0.0` supports only private JSON review followed by administrator
+approval and two account-holder approvals. Markdown fixed files, manually
+attached manifests, and versions created by pre-1.0 releases are not supported
+after upgrade. Do not upgrade a site that needs to keep that earlier evidence
+available through this plugin.
 
 It lets an editor create a fixed version of a selected post or page. The page
 is then rendered from that fixed version, rather than from a separately
@@ -140,8 +139,8 @@ Upload that ZIP through **Plugins > Add New > Upload Plugin**, or extract its
 single plugin folder into `wp-content/plugins/`. The generated `dist/` folder
 is not committed to Git.
 
-For WordPress.org review packaging and the official Plugin Check scan, follow
-[the WordPress.org release checklist](docs/wordpress-org-release.md). The
+For WordPress.org release packaging, SVN publication, and the official Plugin
+Check scan, follow [the WordPress.org release guide](docs/wordpress-org-release.md). The
 Plugin Check helper requires a local WordPress installation and WP-CLI:
 
 ```sh

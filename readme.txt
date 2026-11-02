@@ -4,17 +4,17 @@ Tags: provenance, publishing, verification, blockchain, content integrity
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.0
-Stable tag: 0.9.0
+Stable tag: 1.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Beta plugin: create fixed, verifiable versions of selected posts and pages.
+Create fixed, verifiable versions of selected posts and pages.
 
 == Description ==
 
-This is beta software while it is prepared for WordPress.org review. Test the
-publication and account-approval workflow with your own DigitalOwnership
-account before relying on it for a production publishing process.
+Test the publication and account-approval workflow with your own
+DigitalOwnership account before relying on it for a production publishing
+process.
 
 DigitalOwnership Publication Verification creates a private fixed JSON version of a selected WordPress post or page before it is released. An Editor submits that exact version for review, a WordPress Administrator approves or declines it, and the linked DigitalOwnership account holder approves the two registrations that spend credits. Only after both registrations complete does WordPress publish the exact approved version with its public verification link.
 
@@ -51,14 +51,84 @@ Private fixed versions are not served publicly. The account-holder review uses a
 
 Moving a previously public post to draft, private, or trash removes its public fixed-content and evidence files and disables their public URLs. Exact bytes are retained in a private WordPress archive that only administrators can download. If the post later becomes public again, create and register a new fixed version; archived or withdrawn evidence cannot be selected or republished as a public historical version. Permanent deletion removes that archive too.
 
+== Upgrade Notice ==
+
+= 1.0.0 =
+First stable release. Versions created by pre-1.0 workflows are not supported.
+Do not update a site that must keep those earlier versions available through
+this plugin.
+
+== Frequently Asked Questions ==
+
+= Does the plugin upload my post or page to DigitalOwnership? =
+
+No. WordPress creates the fixed JSON file on your site. For registration, it
+sends only that file's SHA-512 fingerprint, hash scope, blockchain target, and
+request ID. The post body and local image bytes remain on your site.
+
+= Who can approve a publication registration? =
+
+An Editor prepares and submits a fixed version. A WordPress Administrator
+approves or declines it. The linked DigitalOwnership account holder separately
+approves the fixed-content and evidence-file registrations.
+
+= What does visitor verification prove? =
+
+It confirms that the public fixed-content file and evidence file match their
+registered fingerprints, and that matching registrations existed no later than
+their recorded blockchain times. It does not prove authorship, legal ownership,
+or that the content is true.
+
+
+= Why do readers not see my latest saved edit? =
+
+For an already public publication, readers continue to see the last registered
+fixed version while your revision is reviewed and registered. Save your edits,
+create a new private fixed version, submit it for review, and complete both
+account approvals to publish the replacement.
+
+
+= When should I save my post or page? =
+
+Save before creating a private fixed version: it always uses the last saved
+title and content. Do not edit or save again after submitting that version for
+review unless you intend to revise it. A changed saved post requires a new fixed
+version and a new approval workflow.
+
+= Can I turn off verification for a publication? =
+
+Yes, but do so deliberately. Removing the setting withdraws the plugin's public
+fixed-content and evidence files for that publication. The on-chain registration
+cannot be removed, but readers can verify an earlier version only if they already
+hold the relevant file and registration details. Re-enabling verification requires
+a newly created and registered fixed version.
+
+
+== Screenshots ==
+
+1. An Editor creates a private fixed version of a saved post or page.
+2. The editor submits the fixed version for administrator review.
+3. A WordPress Administrator reviews the exact fixed version and SHA-512 fingerprint.
+4. The DigitalOwnership account holder approves the fixed-content registration.
+5. The DigitalOwnership account holder registers the fixed-content fingerprint on-chain.
+6. The account holder reviews and approves the separate public evidence file.
+7. The account holder reviews and  registers the public evidence file fingerprint on-chain.
+8. Readers see the public verification link under the post or article.
+9. Readers use the public verification link to independently check the published version.
+
 == Changelog ==
+
+= 1.0.0 =
+* First stable WordPress.org release.
+* Use the private fixed-version, administrator-review, and two account-holder approval workflow for every new publication version.
+* Publish only the exact fixed content and public evidence file approved through DigitalOwnership.
 
 = 0.9.0 =
 * Add private fixed-version review before first publication.
 * Require WordPress administrator approval before a DigitalOwnership registration request is created.
 * Publish a new article only after the account holder approves both the fixed-content and evidence-file registrations.
 * Keep the existing registered version live while a replacement is reviewed and registered.
-* Remove the former Markdown, manual-manifest, and public-first workflows. Versions created by earlier beta releases are not supported after this upgrade.
+* Remove the former Markdown, manual-manifest, and public-first workflows. Versions created by earlier pre-1.0 releases are not supported after this upgrade.
 
 = 0.8.1 =
 * Load standalone fixed-content and evidence-file preview styles through the WordPress stylesheet queue.
@@ -86,7 +156,7 @@ Moving a previously public post to draft, private, or trash removes its public f
 * Relicense the plugin package as GPLv2 or later and include a license notice.
 
 = 0.6.12 =
-* Remove beta wording from the active documentation.
+* Remove pre-release wording from the active documentation.
 
 = 0.6.11 =
 * Clarify that archived or withdrawn evidence remains administrator-only and cannot later be republished as public version history.
@@ -192,13 +262,13 @@ Moving a previously public post to draft, private, or trash removes its public f
 = 0.3.0 =
 * Add linked-account canonical-file registration from the WordPress evidence box.
 * Offer an explicit immediate-registration option and a stricter account-owner approval option.
-* Keep manifest generation and its separate registration manual during this beta slice.
+* Keep manifest generation and its separate registration manual at this stage.
 
 = 0.2.1 =
 * Send account-link requests to the independent DigitalOwnership account page instead of falling back to the WordPress dashboard.
 
 = 0.2.0 =
-* Add a revocable DigitalOwnership account-connection flow for this WordPress installation. Registration from the WordPress editor is planned for a later beta update.
+* Add a revocable DigitalOwnership account-connection flow for this WordPress installation. Registration from the WordPress editor is planned for a later pre-1.0 update.
 
 = 0.1.9 =
 * Add release-package checks and clarify whether a canonical version is awaiting registration or has an attached manifest.
@@ -210,7 +280,7 @@ Moving a previously public post to draft, private, or trash removes its public f
 * Fix canonical JSON, Markdown, and page metadata output to use real line breaks rather than literal backslash-n characters.
 
 = 0.1.6 =
-* Add an administrator-only diagnostic query mode for beta integration troubleshooting.
+* Add an administrator-only diagnostic query mode for integration troubleshooting.
 
 = 0.1.5 =
 * Resolve the canonical publication from the singular page query rather than a mutable content-filter context.
@@ -225,7 +295,7 @@ Moving a previously public post to draft, private, or trash removes its public f
 * Render the canonical body and visible verification panel after other content filters.
 
 = 0.1.1 =
-* Fix public artifact lookup for canonical versions generated by the initial beta.
+* Fix public artifact lookup for canonical versions generated by the initial implementation.
 
 = 0.1.0 =
-* Initial beta: versioned JSON and Markdown canonical artifacts, manifest attachment, CORS-enabled artifact delivery, visible verification links, and provenance discovery metadata.
+* Initial implementation: versioned JSON and Markdown canonical artifacts, manifest attachment, CORS-enabled artifact delivery, visible verification links, and provenance discovery metadata.

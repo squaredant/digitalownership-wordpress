@@ -9,7 +9,7 @@ DigitalOwnership web-publication verification protocol.
 
 ## Upgrade Compatibility
 
-Version `1.0.0` supports only private JSON review followed by administrator
+Version `1.0.1` supports only private JSON review followed by administrator
 approval and two account-holder approvals. Markdown fixed files, manually
 attached manifests, and versions created by pre-1.0 releases are not supported
 after upgrade. Do not upgrade a site that needs to keep that earlier evidence
@@ -60,6 +60,10 @@ administrator removes the relevant metadata and generated files. Removing the
 token prevents future service requests but cannot retract public evidence that
 has already been published.
 
+Activating, upgrading, saving, or changing a post status never removes or
+archives evidence automatically. Withdrawal remains a separate
+administrator-confirmed action.
+
 ## Connect A DigitalOwnership Account
 
 The plugin can link this WordPress installation to a DigitalOwnership account.
@@ -67,6 +71,12 @@ In WordPress, open **Settings > DigitalOwnership Verification** and select
 **Connect DigitalOwnership account**. Sign in and approve the connection at
 DigitalOwnership. The account page receives only a SHA-256 hash of a new
 site-local token; the raw token is never placed in the browser URL.
+
+Creating the local token does not complete the connection. Return to the
+WordPress settings page after approving it in DigitalOwnership; the plugin
+confirms the linked account before it permits editorial review or registration.
+If you leave the account page without approving, use the clearly marked option
+to complete or cancel the pending connection request.
 
 Use an organisation-owned publishing account, such as
 `publications@company.example`, rather than an individual's account. Its
@@ -83,8 +93,10 @@ account. Restrict WordPress administrator access accordingly.
 The intended newsroom or publishing workflow does not require reporters to
 have a DigitalOwnership account or a pipeline credential:
 
-- A WordPress **Editor** writes and saves the publication, creates its private
-  fixed version, and submits that exact version for administrator review.
+- The original WordPress **author** writes and saves the publication, creates
+  its private fixed version, and submits that exact version for administrator
+  review. For an already verified publication, that author must explicitly
+  start a private revision before editing again.
 - A WordPress **Administrator** connects or removes the site-level
   DigitalOwnership device token, then approves or declines the editor's
   proposed version.
@@ -179,16 +191,17 @@ authorship, or legal ownership.
    Verification** and select **Connect DigitalOwnership account**. Sign in with
    the organisation-owned publishing account and approve the connection.
 4. Edit a post or page and save it. In the **DigitalOwnership publication
-   evidence** box, enable verification and select **Create private fixed
+   evidence** box, enable verification and select **Fix saved content for
    version of saved content**. Submit that exact version for administrator
    approval. An administrator approves or declines it; the linked account
    holder then approves the two registration requests before WordPress
    publishes it.
 
 Creating a fixed version uses the last saved WordPress content. Unsaved block
-editor changes are not included. If the post is edited after a fixed version is
-created, create and register a new version before presenting the changed text
-as verified.
+editor changes are not included. Once a version is publicly verified, ordinary
+saves are locked. The original author must select **Start private revision**;
+readers continue to see the registered version while the replacement is edited,
+reviewed, and registered.
 
 The generated public artifact URL has this form:
 
@@ -205,6 +218,18 @@ wp-content/uploads/digitalownership-publications/<post-id>/<version>/
 Do not edit a generated artifact in place. Create and register a new version
 when the publication changes.
 
+### Restoring A Post Or Backup
+
+The plugin keeps its publication index in WordPress post metadata. If a post
+revision or database backup removes that metadata but the matching final
+`content.json` and `manifest.json` still remain in the uploads directory, the
+plugin can rebuild the public index automatically. It does so only for a public
+post whose current saved body and local images reproduce the exact fixed JSON,
+and whose manifest matches that JSON's SHA-512 fingerprint. It never recovers
+private review records or draft files. If a full restore also removed the
+generated files, restore them from the same backup or retain the downloaded
+fixed JSON and manifest as evidence.
+
 ## Publication Visibility And Removal
 
 Drafts, pending posts, private posts, and existing public posts can create a
@@ -213,12 +238,13 @@ public only after a WordPress administrator has approved it and the linked
 DigitalOwnership account holder has approved both registration requests.
 Password-protected posts are not supported.
 
-If a publication is moved to draft or private status, or is trashed, the plugin
-removes its web-accessible fixed-content and evidence files and makes the former
-versioned URLs return `404`. It retains the exact JSON and manifest bytes in a
-private WordPress post-metadata archive. Only an administrator can download
-those archived files from the publication evidence panel. Permanent deletion of
-the WordPress post also deletes the private archive.
+An active verified publication must be withdrawn before it can be moved to
+Trash or permanently deleted. The separate administrator-only **Withdraw public
+verification** action requires a confirmation before removing the site-hosted
+fixed-content and evidence files and making their former URLs return `404`. The
+exact JSON and manifest bytes remain in a private WordPress post-metadata
+archive that only administrators can download. Permanent deletion after
+withdrawal also deletes the private archive.
 
 Removal cannot retract a file that a third party already downloaded, a copy
 held by an intermediary cache, or the public-ledger fingerprint created for an
@@ -239,8 +265,9 @@ independently download the fixed JSON file in the approver's browser and
 compare its SHA-512 with the approval request. A decline spends no credit; the
 writer can revise and submit a new private fixed version. WordPress retrieves
 the public-ledger result automatically; use
-The evidence panel refreshes automatically while the editor is open. It detects
-saved changes and workflow progress without requiring a browser refresh.
+Each workflow action returns to the editor with its updated state. Reload the
+editor after an account-review action completed in another browser tab or
+device.
 
 After the fixed-version status is **completed**, WordPress creates the evidence
 file from the exact fixed-content file and completed registration evidence. The
@@ -267,14 +294,15 @@ for standard WordPress uploads.
 A fixed version is a historical snapshot. Never overwrite it or replace
 its attached manifest. When the WordPress content changes:
 
-1. Edit and review the post or page.
-2. Select **Create new fixed version**. The editor shows that verification is
-   not ready for that new version.
+1. The original author selects **Start private revision**, then edits and saves
+   the post or page. Readers continue to see the last registered version.
+2. The author selects **Fix revision for review**. The editor shows that
+   verification is not ready for that new version.
 3. Request and complete fixed-version registration.
 4. The writer may select earlier public versions and add a public revision note.
    WordPress prepares the manifest and the account holder separately approves
-   it. The editor refreshes the workflow automatically and enables the
-   verification link only after both registrations complete.
+   it. Reload the editor after external account approval; the verification link
+   appears only after both registrations complete.
 
 Earlier versioned artifact and manifest URLs remain available as historical
 evidence. The visible post/page always renders the current fixed version.

@@ -38,6 +38,9 @@ if (!implementation.includes("wp_add_privacy_policy_content")) {
 if (implementation.includes("echo '<style>")) {
   fail("preview styles must be loaded through the WordPress stylesheet queue");
 }
+if (implementation.includes('error_log(') || implementation.includes('debug_backtrace(') || implementation.includes('DOVP_TRACE')) {
+  fail("the release must not contain temporary diagnostic logging or stack tracing");
+}
 if (!implementation.includes("wp_enqueue_style($handle)") || !implementation.includes("wp_print_styles(array($handle))")) {
   fail("standalone preview pages must enqueue and print their stylesheet");
 }
@@ -121,17 +124,23 @@ if (!implementation.includes("hash_equals($expected_hash, hash_file('sha512', $p
 if (!implementation.includes('private function is_public_publication($post)') || !implementation.includes("'publish' === $post->post_status")) {
   fail("publication evidence must be limited to publicly published posts and pages");
 }
-if (!implementation.includes('remove_evidence_for_non_public_post') || !implementation.includes('remove_publication_evidence')) {
-  fail("unpublished and deleted posts must remove local publication evidence");
+if (implementation.includes('remove_evidence_for_non_public_post')) {
+  fail("ordinary post status changes must not remove publication evidence");
 }
-if (!implementation.includes("META_PRIVATE_ARCHIVE") || !implementation.includes('archive_publication_evidence')) {
-  fail("unpublished publication evidence must be retained only in the private administrator archive");
+if (!implementation.includes('confirm_withdrawal') || !implementation.includes('withdraw_publication_evidence') || !implementation.includes('archive_publication_evidence')) {
+  fail("public evidence withdrawal must require a separate administrator-confirmed action");
 }
-if (!implementation.includes('refresh_evidence_box_after_editor_save') || !implementation.includes('register_editor_status_route') || !implementation.includes("digitalownership-publication/v1")) {
-  fail("the Gutenberg evidence box must refresh through its authenticated status endpoint");
+if (!implementation.includes("META_PRIVATE_ARCHIVE")) {
+  fail("withdrawn publication evidence must be retained in the private administrator archive");
 }
-if (!implementation.includes("'postStatus' => sanitize_key($post->post_status)") || !implementation.includes("window.location.reload()") || !implementation.includes("editor.isEditedPostDirty")) {
-  fail("a clean Gutenberg editor must synchronize after background publication without discarding draft edits");
+if (!implementation.includes('refresh_evidence_box_after_editor_save') || !implementation.includes('lockPostAutosaving') || !implementation.includes("editor.isEditedPostDirty")) {
+  fail("the Gutenberg editor must protect unsaved content and disable autosaves during a locked workflow stage");
+}
+if (!implementation.includes('register_editor_status_route') || !implementation.includes("digitalownership-publication/v1/editor-status/") || !implementation.includes('window.setInterval(refreshEvidenceBox, 3000)')) {
+  fail("the Gutenberg editor must keep its evidence panel aligned with saved server state");
+}
+if (!implementation.includes("'state' => hash('sha256', $html)")) {
+  fail("the editor-status route must avoid replacing an unchanged evidence panel");
 }
 if (!implementation.includes("Registration complete.") || !implementation.includes("Verify live version")) {
   fail("the editor must show a clear completed-registration state");
@@ -155,7 +164,7 @@ if (!implementation.includes("Request a new account review") || !implementation.
 if (!implementation.includes("Request a new evidence-file review") || !implementation.includes("dovp_request_manifest_approval") || !implementation.includes("manifestApprovalAttempt")) {
   fail("an administrator must be able to replace an expired evidence-file account review");
 }
-if (!implementation.includes('This checkbox does not register anything.') || !implementation.includes('Create private fixed version of saved content')) {
+if (!implementation.includes('This checkbox does not register anything.') || !implementation.includes('Fix saved content for review')) {
   fail("the editor must distinguish verification-link opt-in from fixed-version creation");
 }
 if (!implementation.includes('Publication version history') || !implementation.includes("gmdate('Y-m-d H:i:s'")) {

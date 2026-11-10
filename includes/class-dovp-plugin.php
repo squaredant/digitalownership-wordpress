@@ -13,9 +13,12 @@ final class DOVP_Plugin {
     const META_CANDIDATE_VERSION = '_dovp_candidate_version';
     const META_VERSIONS = '_dovp_versions';
     const META_PRIVATE_ARCHIVE = '_dovp_private_archive';
+    const META_REVISION_AUTHOR = '_dovp_revision_author';
     const MANIFEST_SCHEMA = 'digitalownership-publication-manifest-v1';
 
     private static $instance = null;
+    private $public_recovery_attempted = array();
+    private $workflow_publish_in_progress = false;
 
     public static function instance() {
         if (null === self::$instance) {
@@ -28,7 +31,6 @@ final class DOVP_Plugin {
         $plugin = self::instance();
         $plugin->add_rewrite_rules();
         flush_rewrite_rules();
-        $plugin->purge_non_public_publication_evidence();
         update_option('dovp_rewrite_version', DOVP_VERSION, false);
     }
 
@@ -43,11 +45,17 @@ final class DOVP_Plugin {
         add_filter('redirect_canonical', array($this, 'prevent_artifact_canonical_redirect'), 10, 2);
         add_action('template_redirect', array($this, 'serve_publication_artifact'));
         add_action('add_meta_boxes', array($this, 'add_meta_box'));
+        add_filter('wp_insert_post_data', array($this, 'prevent_locked_publication_edits'), 10, 2);
         add_action('save_post', array($this, 'save_post_settings'), 10, 2);
-        add_action('post_updated', array($this, 'remove_evidence_for_non_public_post'), 10, 3);
+        add_filter('pre_trash_post', array($this, 'prevent_trashing_active_publication'), 10, 3);
+        add_filter('rest_pre_dispatch', array($this, 'prevent_rest_trashing_active_publication'), 10, 3);
         add_action('before_delete_post', array($this, 'remove_publication_evidence'));
         add_action('admin_post_dovp_download_archived_evidence', array($this, 'download_archived_evidence'));
         add_action('admin_post_dovp_generate_canonical', array($this, 'generate_canonical'));
+        add_action('admin_post_dovp_start_revision', array($this, 'start_revision'));
+        add_action('admin_post_dovp_cancel_revision', array($this, 'cancel_revision'));
+        add_action('admin_post_dovp_confirm_withdrawal', array($this, 'confirm_withdrawal'));
+        add_action('admin_post_dovp_withdraw_publication_evidence', array($this, 'withdraw_publication_evidence'));
         add_action('admin_post_dovp_submit_editorial_review', array($this, 'submit_editorial_review'));
         add_action('admin_post_dovp_approve_editorial_review', array($this, 'approve_editorial_review'));
         add_action('admin_post_dovp_decline_editorial_review', array($this, 'decline_editorial_review'));
@@ -115,7 +123,6 @@ final class DOVP_Plugin {
             return;
         }
         flush_rewrite_rules(false);
-        $this->purge_non_public_publication_evidence();
         update_option('dovp_rewrite_version', DOVP_VERSION, false);
     }
 
@@ -438,15 +445,14 @@ final class DOVP_Plugin {
         if (!$post) {
             return new WP_Error('dovp_post_not_found', __('Publication not found.', 'digitalownership-publication-verification'), array('status' => 404));
         }
-
         ob_start();
         $this->render_meta_box($post);
         $html = (string) ob_get_clean();
-
         return rest_ensure_response(array(
+            'enabled' => '1' === get_post_meta($post->ID, self::META_ENABLED, true),
+            'postStatus' => sanitize_key($post->post_status),
             'html' => $html,
             'state' => hash('sha256', $html),
-            'postStatus' => sanitize_key($post->post_status),
         ));
     }
 
@@ -458,6 +464,8 @@ final class DOVP_Plugin {
         $candidate_version = get_post_meta($post->ID, self::META_CANDIDATE_VERSION, true);
         $candidate = $this->candidate_record($post->ID);
         $private_archive = $this->private_archive($post->ID);
+        $revision_author_id = $this->revision_author_id($post->ID);
+        $is_revision_author = $revision_author_id && $revision_author_id === get_current_user_id();
         if ($candidate && $this->ensure_manifest_draft_token($candidate)) {
             if (!empty($candidate['manifestApprovalUrl'])) {
                 $candidate['manifestApprovalUrl'] = $this->publication_approval_url($candidate['manifestApprovalUrl'], $post->ID, $candidate, 'manifest');
@@ -466,20 +474,33 @@ final class DOVP_Plugin {
             update_post_meta($post->ID, self::META_VERSIONS, $records);
         }
         $candidate_changed = $candidate && !$this->snapshot_matches_post($post, $candidate);
+        $account_connection_ready = !$candidate || (bool) $this->linked_account_identity();
+        $account_settings_url = admin_url('options-general.php?page=dovp-settings');
 
         wp_nonce_field('dovp_save_post', 'dovp_save_post_nonce');
         ?>
-        <p>
-            <label>
-                <input type="checkbox" name="dovp_enabled" value="1" <?php checked($enabled); ?> />
-                <?php esc_html_e('Use a fixed, verifiable version of this publication and show its public verification link.', 'digitalownership-publication-verification'); ?>
-            </label>
-        </p>
-        <p class="description">
-            <?php esc_html_e('This checkbox does not register anything. After you save, it lets you create a private fixed version for administrator and account review. A new publication is made public only after its fixed content and evidence file are registered.', 'digitalownership-publication-verification'); ?>
-        </p>
+        <?php if ($active_record) : ?>
+            <p><strong><?php esc_html_e('Public verification is active.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Readers see the last registered fixed version, not ordinary editor changes.', 'digitalownership-publication-verification'); ?></p>
+            <?php if (current_user_can('manage_options')) : ?>
+                <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_confirm_withdrawal&post_id=' . $post->ID), 'dovp_confirm_withdrawal_' . $post->ID)); ?>"><?php esc_html_e('Withdraw public verification', 'digitalownership-publication-verification'); ?></a></p>
+                <p class="description"><?php esc_html_e('This is an administrator-only action. It requires a separate confirmation and does not erase a completed blockchain registration. Withdraw verification before moving this post to Trash.', 'digitalownership-publication-verification'); ?></p>
+            <?php endif; ?>
+        <?php else : ?>
+            <p>
+                <label>
+                    <input type="checkbox" name="dovp_enabled" value="1" <?php checked($enabled); ?> />
+                    <?php esc_html_e('Use a fixed, verifiable version of this publication and show its public verification link.', 'digitalownership-publication-verification'); ?>
+                </label>
+            </p>
+            <p class="description">
+                <?php esc_html_e('This checkbox does not register anything. After you save, it lets you create a private fixed version for administrator and account review. A new publication is made public only after its fixed content and evidence file are registered.', 'digitalownership-publication-verification'); ?>
+            </p>
+        <?php endif; ?>
         <?php if ($enabled) : ?>
             <?php $this->render_registration_progress($candidate, $active_record, $candidate_changed); ?>
+        <?php endif; ?>
+        <?php if ($candidate || $revision_author_id) : ?>
+            <p class="description"><strong><?php esc_html_e('WordPress autosave notice:', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('WordPress may show its standard autosave message while this private revision is open. It does not alter the registered public version or its evidence trail. Continue with the DigitalOwnership steps below.', 'digitalownership-publication-verification'); ?></p>
         <?php endif; ?>
         <?php if ($private_archive && current_user_can('manage_options')) : ?>
             <hr />
@@ -523,6 +544,7 @@ final class DOVP_Plugin {
             $manifest_draft_url = $this->manifest_draft_url($post->ID, $candidate);
             $manifest_preview_url = $this->manifest_draft_preview_url($post->ID, $candidate);
             $manifest_sha512 = strtolower(sanitize_text_field($candidate['manifestDraftSha512'] ?? ''));
+            $is_candidate_author = absint($candidate['revisionAuthorId'] ?? 0) === get_current_user_id();
             ?>
             <hr />
             <p><strong><?php esc_html_e('Private fixed version:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($candidate_version); ?></p>
@@ -533,28 +555,42 @@ final class DOVP_Plugin {
                 <p><strong><?php esc_html_e('Fixed-content SHA-512:', 'digitalownership-publication-verification'); ?></strong><br /><code><?php echo esc_html($candidate_sha512); ?></code></p>
             <?php endif; ?>
             <?php if ('draft' === $editorial_status || 'declined' === $editorial_status) : ?>
-                <?php if ('declined' === $editorial_status) : ?><div class="notice notice-warning inline"><p><?php esc_html_e('The previous administrator review was declined. Update the draft if needed, then create a new fixed version before submitting it again.', 'digitalownership-publication-verification'); ?></p></div><?php endif; ?>
-                <h3><?php esc_html_e('Step 2: Submit for administrator review', 'digitalownership-publication-verification'); ?></h3>
-                <p><?php esc_html_e('The author submits this exact private version. A WordPress administrator decides whether it may proceed to DigitalOwnership registration and publication.', 'digitalownership-publication-verification'); ?></p>
-                <?php $history_candidates = $this->public_history_candidates($post->ID, $candidate_version); ?>
-                <?php if ($history_candidates) : ?>
-                    <fieldset>
-                        <legend><strong><?php esc_html_e('Earlier public versions to disclose after publication', 'digitalownership-publication-verification'); ?></strong></legend>
-                        <?php foreach ($history_candidates as $history_candidate) : ?>
-                            <label style="display:block; margin:0.5em 0;"><input form="dovp-action-form" type="checkbox" name="dovp_previous_versions[]" value="<?php echo esc_attr($history_candidate['version']); ?>" /> <?php
-                            /* translators: 1: fixed publication version identifier. 2: UTC registration timestamp. */
-                            echo esc_html(sprintf(__('Version %1$s, registered %2$s UTC', 'digitalownership-publication-verification'), $history_candidate['version'], gmdate('Y-m-d H:i:s', strtotime($history_candidate['registeredAt']))));
-                            ?></label>
-                        <?php endforeach; ?>
-                    </fieldset>
-                    <p><label for="dovp-revision-note"><strong><?php esc_html_e('Public revision note (optional)', 'digitalownership-publication-verification'); ?></strong></label><br /><textarea form="dovp-action-form" id="dovp-revision-note" name="dovp_revision_note" rows="3" maxlength="500" style="width:100%; max-width:640px;"></textarea></p>
+                <?php if ($is_candidate_author) : ?>
+                    <?php if ('declined' === $editorial_status) : ?><div class="notice notice-warning inline"><p><?php esc_html_e('An administrator declined the previous review. Update the draft if needed, then create a new fixed version before submitting it again.', 'digitalownership-publication-verification'); ?></p></div><?php endif; ?>
+                    <h3><?php esc_html_e('Step 2: Submit for administrator review', 'digitalownership-publication-verification'); ?></h3>
+                    <p><?php esc_html_e('You are the author of this private version. Submit it for a WordPress administrator to decide whether it may proceed to DigitalOwnership registration and publication.', 'digitalownership-publication-verification'); ?></p>
+                    <?php $history_candidates = $this->public_history_candidates($post->ID, $candidate_version); ?>
+                    <?php if ($history_candidates) : ?>
+                        <fieldset>
+                            <legend><strong><?php esc_html_e('Earlier public versions to disclose after publication', 'digitalownership-publication-verification'); ?></strong></legend>
+                            <?php foreach ($history_candidates as $history_candidate) : ?>
+                                <label style="display:block; margin:0.5em 0;"><input form="dovp-action-form" type="checkbox" name="dovp_previous_versions[]" value="<?php echo esc_attr($history_candidate['version']); ?>" /> <?php
+                                /* translators: 1: fixed publication version identifier. 2: UTC registration timestamp. */
+                                echo esc_html(sprintf(__('Version %1$s, registered %2$s UTC', 'digitalownership-publication-verification'), $history_candidate['version'], gmdate('Y-m-d H:i:s', strtotime($history_candidate['registeredAt']))));
+                                ?></label>
+                            <?php endforeach; ?>
+                        </fieldset>
+                        <p><label for="dovp-revision-note"><strong><?php esc_html_e('Public revision note (optional)', 'digitalownership-publication-verification'); ?></strong></label><br /><textarea form="dovp-action-form" id="dovp-revision-note" name="dovp_revision_note" rows="3" maxlength="500" style="width:100%; max-width:640px;"></textarea></p>
+                    <?php endif; ?>
+                    <?php if ($account_connection_ready) : ?>
+                        <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_submit_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_submit_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Submit exact version for administrator review', 'digitalownership-publication-verification'); ?></button></p>
+                    <?php else : ?>
+                        <div class="notice notice-warning inline"><p><?php esc_html_e('DigitalOwnership account connection is not confirmed. A WordPress administrator must complete or cancel the pending account connection before this version can be submitted for review.', 'digitalownership-publication-verification'); ?></p><p><a href="<?php echo esc_url($account_settings_url); ?>"><?php esc_html_e('Open DigitalOwnership account connection settings', 'digitalownership-publication-verification'); ?></a></p></div>
+                    <?php endif; ?>
+                <?php elseif (current_user_can('manage_options')) : ?>
+                    <?php if ('declined' === $editorial_status) : ?><div class="notice notice-warning inline"><p><?php esc_html_e('You declined the previous review. Nothing was registered or published. Notify the original author to update the draft and submit a new fixed version if they wish to continue.', 'digitalownership-publication-verification'); ?></p></div><?php else : ?><p class="description"><?php esc_html_e('This private version belongs to its original author. Only that author can submit it for administrator review.', 'digitalownership-publication-verification'); ?></p><?php endif; ?>
+                <?php else : ?>
+                    <p class="description"><?php esc_html_e('This private version belongs to its original author. Only that author can submit it for administrator review.', 'digitalownership-publication-verification'); ?></p>
                 <?php endif; ?>
-                <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_submit_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_submit_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Submit exact version for administrator review', 'digitalownership-publication-verification'); ?></button></p>
             <?php elseif ('pending' === $editorial_status) : ?>
                 <h3><?php esc_html_e('Step 3: Administrator review', 'digitalownership-publication-verification'); ?></h3>
                 <?php if (current_user_can('manage_options')) : ?>
                     <p><?php esc_html_e('Review the rendered fixed version and its SHA-512 fingerprint. Approval sends this exact private version to the linked DigitalOwnership account holder for registration review.', 'digitalownership-publication-verification'); ?></p>
-                    <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_approve_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_approve_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Approve and request DigitalOwnership registration', 'digitalownership-publication-verification'); ?></button> <button class="button button-secondary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_decline_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_decline_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Decline', 'digitalownership-publication-verification'); ?></button></p>
+                    <?php if (!empty($candidate['requestedRevisionNote'])) : ?><p><strong><?php esc_html_e('Proposed public revision note:', 'digitalownership-publication-verification'); ?></strong><br /><?php echo esc_html($candidate['requestedRevisionNote']); ?></p><?php endif; ?>
+                    <?php if (!$account_connection_ready) : ?>
+                        <div class="notice notice-warning inline"><p><?php esc_html_e('DigitalOwnership account connection is not confirmed. Complete or cancel the pending connection before approving this version for registration.', 'digitalownership-publication-verification'); ?></p><p><a href="<?php echo esc_url($account_settings_url); ?>"><?php esc_html_e('Open DigitalOwnership account connection settings', 'digitalownership-publication-verification'); ?></a></p></div>
+                    <?php endif; ?>
+                    <p><?php if ($account_connection_ready) : ?><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_approve_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_approve_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Approve and request DigitalOwnership registration', 'digitalownership-publication-verification'); ?></button> <?php endif; ?><button class="button button-secondary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_decline_editorial_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_decline_editorial_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Decline', 'digitalownership-publication-verification'); ?></button></p>
                 <?php else : ?>
                     <p><?php esc_html_e('This exact version is waiting for a WordPress administrator to approve or decline it.', 'digitalownership-publication-verification'); ?></p>
                 <?php endif; ?>
@@ -598,9 +634,21 @@ final class DOVP_Plugin {
         <?php elseif ($active_record) : ?>
             <hr />
             <div class="notice notice-success inline"><p><strong><?php esc_html_e('Registration complete.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('Readers see the registered fixed version. Create a new private fixed version before releasing a revision.', 'digitalownership-publication-verification'); ?></p></div>
-            <p><a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_generate_canonical&post_id=' . $post->ID), 'dovp_generate_canonical_' . $post->ID)); ?>"><?php esc_html_e('Create a private fixed revision', 'digitalownership-publication-verification'); ?></a> <a class="button button-secondary" href="<?php echo esc_url($this->verification_url($active_record['manifestUrl'])); ?>" target="_blank" rel="noopener"><?php esc_html_e('Verify live version', 'digitalownership-publication-verification'); ?></a></p>
+            <?php if ($is_revision_author) : ?>
+                <p><?php esc_html_e('Save the edits you want reviewed. Then fix that saved revision for review and registration.', 'digitalownership-publication-verification'); ?></p>
+                <p><a class="button button-primary dovp-requires-saved-post" data-dovp-requires-saved-post="1" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_generate_canonical&post_id=' . $post->ID), 'dovp_generate_canonical_' . $post->ID)); ?>"><?php esc_html_e('Fix revision for review', 'digitalownership-publication-verification'); ?></a> <a class="button button-secondary dovp-requires-saved-post" data-dovp-requires-saved-post="1" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_cancel_revision&post_id=' . $post->ID), 'dovp_cancel_revision_' . $post->ID)); ?>"><?php esc_html_e('Pause private revision', 'digitalownership-publication-verification'); ?></a></p>
+                <p class="description"><?php esc_html_e('Pausing keeps your saved working text but locks further edits until you start a private revision again.', 'digitalownership-publication-verification'); ?></p>
+            <?php elseif ($revision_author_id) : ?>
+                <p class="description"><?php esc_html_e('A private revision is open for the original author. The public fixed version remains unchanged while it is reviewed.', 'digitalownership-publication-verification'); ?></p>
+            <?php elseif (get_current_user_id() === (int) $post->post_author) : ?>
+                <p><a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_start_revision&post_id=' . $post->ID), 'dovp_start_revision_' . $post->ID)); ?>"><?php esc_html_e('Start private revision', 'digitalownership-publication-verification'); ?></a></p>
+                <p class="description"><?php esc_html_e('Start a revision before editing. Until then, ordinary saves cannot change the working source of this verified publication.', 'digitalownership-publication-verification'); ?></p>
+            <?php else : ?>
+                <p class="description"><?php esc_html_e('Only the original author can start a private revision. Administrators review and approve submitted fixed versions but cannot silently change them.', 'digitalownership-publication-verification'); ?></p>
+            <?php endif; ?>
+            <p><a class="button button-secondary" href="<?php echo esc_url($this->verification_url($active_record['manifestUrl'])); ?>" target="_blank" rel="noopener"><?php esc_html_e('Verify live version', 'digitalownership-publication-verification'); ?></a></p>
         <?php else : ?>
-            <p><a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_generate_canonical&post_id=' . $post->ID), 'dovp_generate_canonical_' . $post->ID)); ?>"><?php esc_html_e('Step 1: Create private fixed version of saved content', 'digitalownership-publication-verification'); ?></a></p>
+            <p><a class="button button-primary dovp-requires-saved-post" data-dovp-requires-saved-post="1" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_generate_canonical&post_id=' . $post->ID), 'dovp_generate_canonical_' . $post->ID)); ?>"><?php esc_html_e('Step 1: Fix saved content for review', 'digitalownership-publication-verification'); ?></a></p>
             <p class="description"><?php esc_html_e('This does not spend a credit and does not publish the post. It creates the exact saved version that the author can submit for administrator review.', 'digitalownership-publication-verification'); ?></p>
         <?php endif; ?>
         <?php if ($records) : ?>
@@ -730,22 +778,64 @@ final class DOVP_Plugin {
         if (!$screen || !in_array($screen->post_type, array('post', 'page'), true)) {
             return;
         }
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This only selects the current editor post and performs no action.
+        $post_id = isset($_GET['post']) ? absint($_GET['post']) : 0;
+        $save_locked = $post_id && $this->publication_edit_locked_for_user($post_id, get_current_user_id());
 
-        // Gutenberg does not re-render classic meta boxes after a REST save.
-        // Poll only this editor's same-origin status endpoint while it is open.
+        // Gutenberg does not reliably redraw a classic meta box after a REST
+        // save. Refresh this read-only panel from the authenticated server
+        // state while the editor is open; it never writes evidence data.
         wp_enqueue_script('wp-data');
         wp_add_inline_script('wp-data', 'window.DOVP_EDITOR_STATUS = ' . wp_json_encode(array(
             'endpointBase' => esc_url_raw(rest_url('digitalownership-publication/v1/editor-status/')),
             'nonce' => wp_create_nonce('wp_rest'),
+            'lockSaving' => (bool) $save_locked,
+            'unsavedMessage' => __('Save or update this post before continuing. The next step must use the exact saved version.', 'digitalownership-publication-verification'),
         )) . ';', 'before');
         $script = <<<'JS'
 (function () {
     if (!window.wp || !window.wp.data) return;
 
     function bindEvidenceRefresh() {
+        var settings = window.DOVP_EDITOR_STATUS || {};
+        var lockKey = 'dovp-fixed-publication';
         var refreshInProgress = false;
         var lastState = '';
-        var settings = window.DOVP_EDITOR_STATUS || {};
+
+        function syncSavingLock() {
+            var dispatcher = window.wp.data.dispatch('core/editor');
+            if (!dispatcher) return;
+            if (settings.lockSaving && 'function' === typeof dispatcher.lockPostSaving) {
+                dispatcher.lockPostSaving(lockKey);
+                // Gutenberg autosaves through a separate action. Leaving it
+                // available during a protected workflow can create an
+                // autosave revision even though ordinary saving is locked.
+                if ('function' === typeof dispatcher.lockPostAutosaving) {
+                    dispatcher.lockPostAutosaving(lockKey);
+                }
+            } else if ('function' === typeof dispatcher.unlockPostSaving) {
+                dispatcher.unlockPostSaving(lockKey);
+                if ('function' === typeof dispatcher.unlockPostAutosaving) {
+                    dispatcher.unlockPostAutosaving(lockKey);
+                }
+            }
+        }
+
+        function bindSavedVersionActions() {
+            document.addEventListener('click', function (event) {
+                var target = event.target && event.target.closest
+                    ? event.target.closest('[data-dovp-requires-saved-post="1"]')
+                    : null;
+                if (!target) return;
+                var editor = window.wp.data.select('core/editor');
+                var isDirty = editor && 'function' === typeof editor.isEditedPostDirty
+                    ? editor.isEditedPostDirty()
+                    : false;
+                if (!isDirty) return;
+                event.preventDefault();
+                window.alert(settings.unsavedMessage || 'Save or update this post before continuing.');
+            });
+        }
 
         function refreshEvidenceBox() {
             if (refreshInProgress) return;
@@ -769,29 +859,17 @@ final class DOVP_Plugin {
                     inside.innerHTML = payload.html;
                     lastState = payload.state;
                 }
-
-                // The background workflow may publish a pending post while
-                // Gutenberg still has the previous status in browser state.
-                // Reload only a clean editor, so no local draft changes are lost.
-                var currentStatus = editor && 'function' === typeof editor.getEditedPostAttribute
-                    ? editor.getEditedPostAttribute('status')
-                    : '';
-                var isDirty = editor && 'function' === typeof editor.isEditedPostDirty
-                    ? editor.isEditedPostDirty()
-                    : true;
-                if ('publish' === payload.postStatus && 'publish' !== currentStatus && !isDirty) {
-                    window.location.reload();
-                }
             }).catch(function () {
-                // The editor remains usable if this status refresh fails.
+                // The editor remains usable if this read-only refresh fails.
             }).finally(function () {
                 refreshInProgress = false;
             });
         }
 
+        syncSavingLock();
+        bindSavedVersionActions();
         refreshEvidenceBox();
         window.setInterval(refreshEvidenceBox, 3000);
-
     }
 
     if ('loading' === document.readyState) {
@@ -814,22 +892,72 @@ JS;
         if (!current_user_can('edit_post', $post_id)) {
             return;
         }
-        if (!$this->is_public_publication($post) && !$this->has_active_prepublication_candidate($post_id)) {
-            $this->archive_publication_evidence($post_id);
-        }
-
-        update_post_meta($post_id, self::META_ENABLED, !empty($_POST['dovp_enabled']) ? '1' : '0');
-    }
-
-    public function remove_evidence_for_non_public_post($post_id, $post_after, $post_before) {
-        if (!$this->is_public_publication($post_after) && !$this->has_active_prepublication_candidate($post_id)) {
-            $this->archive_publication_evidence($post_id);
+        // An active verified publication no longer renders an editable
+        // checkbox. Preserve its state when an ordinary WordPress save does
+        // not include the field, rather than interpreting that omission as a
+        // request to withdraw public verification.
+        if (array_key_exists('dovp_enabled', $_POST)) {
+            $requested_enabled = !empty($_POST['dovp_enabled']);
+            $currently_enabled = '1' === get_post_meta($post_id, self::META_ENABLED, true);
+            if (!$currently_enabled || $requested_enabled) {
+                update_post_meta($post_id, self::META_ENABLED, $requested_enabled ? '1' : '0');
+            }
         }
     }
 
     public function remove_publication_evidence($post_id) {
+        $post = get_post($post_id);
+        if (!$post || !in_array($post->post_type, array('post', 'page'), true) || wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) {
+            return;
+        }
         $this->remove_active_publication_evidence($post_id);
         delete_post_meta(absint($post_id), self::META_PRIVATE_ARCHIVE);
+    }
+
+    public function prevent_trashing_active_publication($check, $post, $previous_status) {
+        if ($check || !$post || !in_array($post->post_type, array('post', 'page'), true)) {
+            return $check;
+        }
+        if (!$this->active_record($post->ID)) {
+            return $check;
+        }
+
+        $edit_url = get_edit_post_link($post->ID, 'url');
+        $message = '<p>' . esc_html__('This publication still has active public verification. Withdraw public verification first, then move the post to Trash.', 'digitalownership-publication-verification') . '</p>';
+        if ($edit_url) {
+            $message .= '<p><a class="button button-primary" href="' . esc_url($edit_url) . '">' . esc_html__('Return to the publication', 'digitalownership-publication-verification') . '</a></p>';
+        }
+        $allowed_html = array(
+            'p' => array(),
+            'a' => array('class' => true, 'href' => true),
+        );
+        wp_die(
+            wp_kses($message, $allowed_html),
+            esc_html__('Withdraw verification before trashing', 'digitalownership-publication-verification'),
+            array('response' => 409)
+        );
+    }
+
+    public function prevent_rest_trashing_active_publication($result, $server, $request) {
+        if (null !== $result || !$request instanceof WP_REST_Request || 'DELETE' !== $request->get_method()) {
+            return $result;
+        }
+
+        $route = (string) $request->get_route();
+        if (!preg_match('#^/wp/v2/(?:posts|pages)/(\d+)$#', $route, $matches)) {
+            return $result;
+        }
+
+        $post = get_post(absint($matches[1]));
+        if (!$post || !$this->active_record($post->ID)) {
+            return $result;
+        }
+
+        return new WP_Error(
+            'dovp_withdrawal_required',
+            __('This publication still has active public verification. Withdraw public verification first, then move the post to Trash.', 'digitalownership-publication-verification'),
+            array('status' => 409)
+        );
     }
 
     private function archive_publication_evidence($post_id) {
@@ -837,7 +965,9 @@ JS;
         if (!$post_id) return;
 
         $records = $this->publication_records($post_id);
-        if (!$records) return;
+        if (!$records) {
+            return;
+        }
         $archive = $this->private_archive($post_id);
         foreach ($records as $version => $record) {
             if (!is_array($record)) continue;
@@ -869,24 +999,6 @@ JS;
         delete_post_meta($post_id, self::META_ENABLED);
         delete_post_meta($post_id, self::META_VERSION);
         delete_post_meta($post_id, self::META_VERSIONS);
-    }
-
-    private function purge_non_public_publication_evidence() {
-        // This activation/upgrade cleanup intentionally inspects only posts with evidence metadata.
-        $post_ids = get_posts(array(
-            'post_type' => array('post', 'page'),
-            'post_status' => array('publish', 'future', 'draft', 'pending', 'private', 'trash'),
-            'posts_per_page' => -1,
-            'fields' => 'ids',
-            // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- Runs only during activation or upgrade to remove stale evidence.
-            'meta_key' => self::META_VERSIONS,
-            'no_found_rows' => true,
-        ));
-        foreach ($post_ids as $post_id) {
-            if (!$this->is_public_publication(get_post($post_id)) && !$this->has_active_prepublication_candidate($post_id)) {
-                $this->archive_publication_evidence($post_id);
-            }
-        }
     }
 
     public function download_archived_evidence() {
@@ -928,6 +1040,13 @@ JS;
         if (!$this->can_create_candidate_version($post)) {
             wp_die(esc_html__('A fixed version can be created only for a saved post or page without password protection.', 'digitalownership-publication-verification'), 403);
         }
+        $active_record = $this->active_record($post_id);
+        if ($active_record && $this->revision_author_id($post_id) !== get_current_user_id()) {
+            wp_die(esc_html__('Only the original author can create a revision of this verified publication after starting a private revision.', 'digitalownership-publication-verification'), 403);
+        }
+        if ($active_record && $this->candidate_is_locked($this->candidate_record($post_id))) {
+            wp_die(esc_html__('This revision is already under review and cannot be replaced.', 'digitalownership-publication-verification'), 403);
+        }
         // Route values are normalized by WordPress, so use a URL-safe lowercase
         // identifier for both the stored record and its public artifact URL.
         $version = sanitize_key(gmdate('Y-m-d\\THis\\Z'));
@@ -961,6 +1080,7 @@ JS;
             'sourceRevisionHash' => $this->post_revision_hash($post),
             'publicationMode' => $this->is_public_publication($post) ? 'revision' : 'prepublication',
             'editorialStatus' => 'draft',
+            'revisionAuthorId' => get_current_user_id(),
             'reviewToken' => wp_generate_password(32, false, false),
             'publiclyReleased' => false,
             'createdAt' => gmdate('c'),
@@ -974,6 +1094,80 @@ JS;
         $this->redirect_with_notice($post_id, 'generated');
     }
 
+    public function start_revision() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        if (!$post_id || !current_user_can('edit_post', $post_id)) {
+            wp_die(esc_html__('You cannot start a revision for this publication.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_start_revision_' . $post_id);
+
+        $post = get_post($post_id);
+        if (!$post || !$this->active_record($post_id) || $this->candidate_record($post_id) || get_current_user_id() !== (int) $post->post_author) {
+            wp_die(esc_html__('Only the original author can start a private revision of this verified publication.', 'digitalownership-publication-verification'), 403);
+        }
+
+        update_post_meta($post_id, self::META_REVISION_AUTHOR, get_current_user_id());
+        $this->redirect_with_notice($post_id, 'revision-started');
+    }
+
+    public function cancel_revision() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        if (!$post_id || !current_user_can('edit_post', $post_id)) {
+            wp_die(esc_html__('You cannot close this private revision.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_cancel_revision_' . $post_id);
+
+        if ($this->revision_author_id($post_id) !== get_current_user_id() || $this->candidate_record($post_id)) {
+            wp_die(esc_html__('Only the author can close an unsubmitted private revision.', 'digitalownership-publication-verification'), 403);
+        }
+
+        delete_post_meta($post_id, self::META_REVISION_AUTHOR);
+        $this->redirect_with_notice($post_id, 'revision-closed');
+    }
+
+    public function confirm_withdrawal() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        if (!$post_id || !current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot withdraw this publication evidence.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_confirm_withdrawal_' . $post_id);
+        if (!$this->active_record($post_id)) {
+            wp_die(esc_html__('This publication has no active public verification to withdraw.', 'digitalownership-publication-verification'), 404);
+        }
+
+        $message = '<h1>' . esc_html__('Withdraw public verification?', 'digitalownership-publication-verification') . '</h1>' .
+            '<p>' . esc_html__('This removes the fixed JSON, public evidence file, and verification link from this website. It does not erase completed blockchain registrations. The files remain available only to WordPress administrators in the private archive.', 'digitalownership-publication-verification') . '</p>' .
+            '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">' .
+            '<input type="hidden" name="action" value="dovp_withdraw_publication_evidence" />' .
+            '<input type="hidden" name="post_id" value="' . esc_attr((string) $post_id) . '" />' .
+            wp_nonce_field('dovp_withdraw_publication_evidence_' . $post_id, '_wpnonce', true, false) .
+            '<p><button type="submit" class="button button-primary">' . esc_html__('Withdraw public verification', 'digitalownership-publication-verification') . '</button> ' .
+            '<a class="button" href="' . esc_url(get_edit_post_link($post_id, 'url')) . '">' . esc_html__('Cancel', 'digitalownership-publication-verification') . '</a></p></form>';
+        $allowed_html = array(
+            'h1' => array(),
+            'p' => array(),
+            'form' => array('method' => true, 'action' => true),
+            'input' => array('type' => true, 'name' => true, 'value' => true),
+            'button' => array('type' => true, 'class' => true),
+            'a' => array('class' => true, 'href' => true),
+        );
+        wp_die(
+            wp_kses($message, $allowed_html),
+            esc_html__('Withdraw public verification', 'digitalownership-publication-verification'),
+            array('response' => 200)
+        );
+    }
+
+    public function withdraw_publication_evidence() {
+        $post_id = isset($_POST['post_id']) ? absint($_POST['post_id']) : 0;
+        if (!$post_id || !current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot withdraw this publication evidence.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_withdraw_publication_evidence_' . $post_id);
+        $this->archive_publication_evidence($post_id);
+        $this->redirect_with_notice($post_id, 'verification-withdrawn');
+    }
+
     public function submit_editorial_review() {
         $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
         $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
@@ -984,11 +1178,11 @@ JS;
 
         $post = get_post($post_id);
         list($stored_version, $record) = $this->record_for_version($post_id, $version);
-        if (!$post || !$this->is_candidate_record($record) || !$this->snapshot_matches_post($post, $record)) {
+        if (!$post || !$this->is_candidate_record($record) || !$this->snapshot_matches_post($post, $record) || get_current_user_id() !== absint($record['revisionAuthorId'] ?? 0)) {
             $this->redirect_with_notice($post_id, 'candidate-outdated');
         }
-        if (!get_option(self::OPTION_SITE_TOKEN, '')) {
-            $this->redirect_with_notice($post_id, 'approval-unavailable');
+        if (!$this->linked_account_identity()) {
+            $this->redirect_with_notice($post_id, 'account-connection-pending');
         }
 
         $record['editorialStatus'] = 'pending';
@@ -1022,6 +1216,9 @@ JS;
         $token = get_option(self::OPTION_SITE_TOKEN, '');
         if (!$post || !$token || !$this->is_candidate_record($record) || 'pending' !== ($record['editorialStatus'] ?? '') || !$this->snapshot_matches_post($post, $record)) {
             $this->redirect_with_notice($post_id, 'candidate-outdated');
+        }
+        if (!$this->linked_account_identity($token)) {
+            $this->redirect_with_notice($post_id, 'account-connection-pending');
         }
 
         $record['editorialStatus'] = 'approved';
@@ -1078,9 +1275,12 @@ JS;
         $notice = isset($_GET['dovp_notice']) ? sanitize_key(wp_unslash($_GET['dovp_notice'])) : '';
         $messages = array(
             'generated' => array('success', __('Private fixed version created. Review it, then submit it for administrator review.', 'digitalownership-publication-verification')),
+            'revision-started' => array('success', __('Private revision opened. The public page still shows the registered fixed version while you prepare the next version.', 'digitalownership-publication-verification')),
+            'revision-closed' => array('success', __('Private revision closed. Ordinary saves are locked again until the original author starts another revision.', 'digitalownership-publication-verification')),
+            'verification-withdrawn' => array('warning', __('Public verification was withdrawn from this website. Completed blockchain registrations remain unchanged; administrators can download archived evidence files below.', 'digitalownership-publication-verification')),
             'editorial-review-requested' => array('success', __('Administrator review requested. A WordPress administrator can now approve or decline this exact private version.', 'digitalownership-publication-verification')),
             'editorial-approved' => array('success', __('Administrator approval recorded. The DigitalOwnership account holder can now review and approve registration of the exact fixed version.', 'digitalownership-publication-verification')),
-            'editorial-declined' => array('warning', __('Administrator review declined. Nothing was registered or published. The author can continue editing and submit a new fixed version.', 'digitalownership-publication-verification')),
+            'editorial-declined' => array('warning', __('Administrator review declined. Nothing was registered or published. Only the original author can update the draft and submit a new fixed version.', 'digitalownership-publication-verification')),
             'candidate-outdated' => array('warning', __('The saved post no longer matches the private fixed version. Create a new fixed version before submitting or approving it.', 'digitalownership-publication-verification')),
             'approval-requested' => array('success', __('Review request sent. The DigitalOwnership account holder can read the fixed publication version and approve or decline its exact fingerprint. Return here afterwards to refresh the status.', 'digitalownership-publication-verification')),
             'approval-refreshed' => array('success', __('Approval status refreshed.', 'digitalownership-publication-verification')),
@@ -1088,6 +1288,7 @@ JS;
             'manifest-approval-requested' => array('success', __('Public evidence file review requested. The DigitalOwnership account holder can approve or decline its exact fingerprint. Return here afterwards to refresh the status.', 'digitalownership-publication-verification')),
             'manifest-published' => array('success', __('Both registrations completed. This exact approved version is now public with its verification link.', 'digitalownership-publication-verification')),
             'approval-unavailable' => array('error', __('The WordPress site is not connected, or this fixed version is unavailable.', 'digitalownership-publication-verification')),
+            'account-connection-pending' => array('error', __('DigitalOwnership account connection is not complete. Open Settings > DigitalOwnership Verification to complete or cancel the pending connection before continuing.', 'digitalownership-publication-verification')),
             'approval-failed' => array('error', __('DigitalOwnership could not create the approval request. Check the linked account, available credits, and service status.', 'digitalownership-publication-verification')),
             'approval-refresh-failed' => array('error', __('DigitalOwnership could not retrieve the approval status. Check the linked account connection and try again.', 'digitalownership-publication-verification')),
             'manifest-unavailable' => array('error', __('The fixed version must be registered before its public evidence file can be created.', 'digitalownership-publication-verification')),
@@ -1103,6 +1304,7 @@ JS;
         $verifier = $settings['verifier_url'] ?? 'https://digitalownership.squaredant.com/verify-publication';
         $site_token = get_option(self::OPTION_SITE_TOKEN, '');
         $account_url = $this->account_link_url($site_token);
+        $account_identity = $this->linked_account_identity($site_token);
         ?>
         <div class="wrap">
             <h1><?php esc_html_e('DigitalOwnership Publication Verification', 'digitalownership-publication-verification'); ?></h1>
@@ -1121,13 +1323,21 @@ JS;
             </form>
             <hr />
             <h2><?php esc_html_e('DigitalOwnership account connection', 'digitalownership-publication-verification'); ?></h2>
-            <?php if ($site_token) : ?>
-                <p><?php esc_html_e('This WordPress installation has a site-local DigitalOwnership device token. Keep WordPress administrator access restricted. You can revoke this connection from your DigitalOwnership account at any time.', 'digitalownership-publication-verification'); ?></p>
+            <?php if ($site_token && $account_identity) : ?>
+                <p><?php esc_html_e('This WordPress installation is connected to a DigitalOwnership account. Keep WordPress administrator access restricted. You can revoke this connection from your DigitalOwnership account at any time.', 'digitalownership-publication-verification'); ?></p>
                 <p><a class="button button-secondary" href="<?php echo esc_url($account_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open account connection', 'digitalownership-publication-verification'); ?></a></p>
                 <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                     <?php wp_nonce_field('dovp_disconnect_account'); ?>
                     <input type="hidden" name="action" value="dovp_disconnect_account" />
                     <p><button class="button button-link-delete" type="submit"><?php esc_html_e('Remove this site token', 'digitalownership-publication-verification'); ?></button></p>
+                </form>
+            <?php elseif ($site_token) : ?>
+                <div class="notice notice-warning inline"><p><strong><?php esc_html_e('Account connection not confirmed.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('This WordPress installation has a pending local connection request, but no DigitalOwnership account has approved it yet. It cannot request registrations or spend credits.', 'digitalownership-publication-verification'); ?></p></div>
+                <p><a class="button button-primary" href="<?php echo esc_url($account_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Complete DigitalOwnership account connection', 'digitalownership-publication-verification'); ?></a></p>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                    <?php wp_nonce_field('dovp_disconnect_account'); ?>
+                    <input type="hidden" name="action" value="dovp_disconnect_account" />
+                    <p><button class="button button-link-delete" type="submit"><?php esc_html_e('Cancel pending connection request', 'digitalownership-publication-verification'); ?></button></p>
                 </form>
             <?php else : ?>
                 <p><?php esc_html_e('Connect this WordPress installation to a DigitalOwnership account before using in-dashboard registration. The account owner approves the connection on DigitalOwnership.', 'digitalownership-publication-verification'); ?></p>
@@ -1190,6 +1400,9 @@ JS;
         if (!$token || !$post || !$this->is_candidate_record($record) || 'approved' !== ($record['editorialStatus'] ?? '') || !$this->snapshot_matches_post($post, $record)) {
             $this->redirect_with_notice($post_id, 'approval-unavailable');
         }
+        if (!$this->linked_account_identity($token)) {
+            $this->redirect_with_notice($post_id, 'account-connection-pending');
+        }
         if (!$this->create_content_approval($post_id, $stored_version, $record, $token)) {
             $this->redirect_with_notice($post_id, 'approval-failed');
         }
@@ -1250,6 +1463,9 @@ JS;
         if (!$token || !$post || !$this->is_candidate_record($record) || 'approved' !== ($record['editorialStatus'] ?? '') || !$content_completed || empty($record['manifestDraft']) || !$terminal || !$this->snapshot_matches_post($post, $record)) {
             $this->redirect_with_notice($post_id, 'approval-unavailable');
         }
+        if (!$this->linked_account_identity($token)) {
+            $this->redirect_with_notice($post_id, 'account-connection-pending');
+        }
         if (!$this->create_manifest_approval($post_id, $stored_version, $record, $token)) {
             $this->redirect_with_notice($post_id, 'approval-failed');
         }
@@ -1266,7 +1482,7 @@ JS;
         list($stored_version, $record) = $this->record_for_version($post_id, $version);
         $token = get_option(self::OPTION_SITE_TOKEN, '');
         $post = get_post($post_id);
-        if (!$post_id || !$stored_version || !is_array($record) || !$token) {
+        if (!$post_id || !$stored_version || !is_array($record) || !$token || !$this->linked_account_identity($token)) {
             return;
         }
 
@@ -1443,6 +1659,7 @@ JS;
         if (!$post_id) {
             return $this->diagnostic_content($content, 'no-post');
         }
+        $this->maybe_recover_public_evidence($post_id);
         if ('1' !== get_post_meta($post_id, self::META_ENABLED, true)) {
             return $this->diagnostic_content($content, 'evidence-disabled');
         }
@@ -1517,6 +1734,7 @@ JS;
     }
 
     private function active_record($post_id) {
+        $this->maybe_recover_public_evidence($post_id);
         if ('1' !== get_post_meta($post_id, self::META_ENABLED, true)) {
             return null;
         }
@@ -1531,6 +1749,75 @@ JS;
         $records = $this->publication_records($post_id);
         $record = $version && isset($records[$version]) ? $records[$version] : null;
         return $this->is_candidate_record($record) ? $record : null;
+    }
+
+    private function revision_author_id($post_id) {
+        return absint(get_post_meta($post_id, self::META_REVISION_AUTHOR, true));
+    }
+
+    private function candidate_is_locked($candidate) {
+        return is_array($candidate) && in_array(
+            sanitize_key($candidate['editorialStatus'] ?? ''),
+            array('pending', 'approved'),
+            true
+        );
+    }
+
+    private function publication_edit_locked_for_user($post_id, $user_id) {
+        $candidate = $this->candidate_record($post_id);
+        if ($candidate) {
+            if ($this->candidate_is_locked($candidate)) {
+                return true;
+            }
+            $candidate_author = absint($candidate['revisionAuthorId'] ?? 0);
+            if ($candidate_author) {
+                return $candidate_author !== absint($user_id);
+            }
+        }
+
+        $active = $this->active_record($post_id);
+        if (!$active) {
+            return false;
+        }
+
+        $revision_author = $this->revision_author_id($post_id);
+        return !$revision_author || $revision_author !== absint($user_id);
+    }
+
+    public function prevent_locked_publication_edits($data, $postarr) {
+        // The final release is a plugin-controlled status change after both
+        // exact files have completed registration. It must not be treated as
+        // an ordinary editor save.
+        if ($this->workflow_publish_in_progress) {
+            return $data;
+        }
+        $post_id = isset($postarr['ID']) ? absint($postarr['ID']) : 0;
+        if (!$post_id || !in_array($data['post_type'] ?? '', array('post', 'page'), true)) {
+            return $data;
+        }
+
+        $existing = get_post($post_id);
+        if (!$existing || !$this->publication_edit_locked_for_user($post_id, get_current_user_id())) {
+            // A private revision changes the working title and body, but it
+            // cannot unpublish the public fixed version. Withdrawal is an
+            // explicit administrator action after the revision is closed.
+            if ($existing
+                && $this->active_record($post_id)
+                && $this->revision_author_id($post_id) === get_current_user_id()
+                && $this->is_public_publication($existing)) {
+                $data['post_status'] = $existing->post_status;
+                $data['post_password'] = $existing->post_password;
+            }
+            return $data;
+        }
+
+        // The verified version remains the reader-facing version. Do not let a
+        // regular save silently change the working source outside a revision.
+        $data['post_title'] = $existing->post_title;
+        $data['post_content'] = $existing->post_content;
+        $data['post_excerpt'] = $existing->post_excerpt;
+        $data['post_status'] = $existing->post_status;
+        return $data;
     }
 
     private function is_candidate_record($record) {
@@ -1689,12 +1976,137 @@ JS;
 
     private function record_for_version($post_id, $requested_version) {
         $normalized = sanitize_key($requested_version);
-        foreach ($this->publication_records($post_id) as $stored_version => $record) {
+        $records = $this->publication_records($post_id);
+        if (!$records) {
+            $this->maybe_recover_public_evidence($post_id);
+            $records = $this->publication_records($post_id);
+        }
+        foreach ($records as $stored_version => $record) {
             if ($normalized === sanitize_key($stored_version)) {
                 return array($stored_version, $record);
             }
         }
         return array('', null);
+    }
+
+    /**
+     * Rebuild only missing public metadata from final, on-disk evidence. This
+     * covers a database/post-revision restore that left the public artifacts in
+     * place. Drafts and private records are intentionally never reconstructed.
+     */
+    private function maybe_recover_public_evidence($post_id) {
+        $post_id = absint($post_id);
+        if (!$post_id || !empty($this->public_recovery_attempted[$post_id])) {
+            return false;
+        }
+        $this->public_recovery_attempted[$post_id] = true;
+
+        $post = get_post($post_id);
+        if (!$this->is_public_publication($post) || $this->publication_records($post_id)) {
+            return false;
+        }
+
+        $post_directory = trailingslashit($this->storage_root()) . $post_id;
+        if (!is_dir($post_directory) || !is_readable($post_directory)) {
+            return false;
+        }
+
+        $records = array();
+        try {
+            $entries = new DirectoryIterator($post_directory);
+        } catch (UnexpectedValueException $exception) {
+            return false;
+        }
+        foreach ($entries as $entry) {
+            if ($entry->isDot() || !$entry->isDir() || $entry->isLink()) {
+                continue;
+            }
+            $version = sanitize_key($entry->getFilename());
+            if (!$version || $version !== $entry->getFilename()) {
+                continue;
+            }
+            $record = $this->recover_public_record($post, $version);
+            if ($record) {
+                $records[$version] = $record;
+            }
+        }
+        if (!$records) {
+            return false;
+        }
+
+        uksort($records, static function ($left, $right) {
+            return strcmp((string) $right, (string) $left);
+        });
+        $active_version = (string) array_key_first($records);
+        update_post_meta($post_id, self::META_VERSIONS, $records);
+        update_post_meta($post_id, self::META_VERSION, $active_version);
+        update_post_meta($post_id, self::META_ENABLED, '1');
+        return true;
+    }
+
+    private function recover_public_record($post, $version) {
+        if (!$post || !$version) {
+            return null;
+        }
+        $directory = $this->version_directory($post->ID, $version);
+        $content_path = trailingslashit($directory) . 'content.json';
+        $manifest_path = trailingslashit($directory) . 'manifest.json';
+        if (!is_readable($content_path) || !is_readable($manifest_path)) {
+            return null;
+        }
+        $content_bytes = $this->filesystem_contents($content_path);
+        $manifest_bytes = $this->filesystem_contents($manifest_path);
+        $content = json_decode($content_bytes, true);
+        $manifest = json_decode($manifest_bytes, true);
+        $content_url = $this->artifact_url($post->ID, $version, 'content', 'json');
+        if (!is_array($content)
+            || 'digitalownership-wordpress-canonical-content-v2' !== ($content['schema'] ?? '')
+            || $version !== sanitize_key($content['version'] ?? '')
+            || absint($content['source']['postId'] ?? 0) !== (int) $post->ID
+            || $content_url !== esc_url_raw($content['source']['canonicalContentUrl'] ?? '')
+            || !$this->manifest_matches_content($manifest, $content_url, $content_path)) {
+            return null;
+        }
+
+        // A public fixed version remains valid while its author prepares a
+        // replacement. Rebuild image mappings only when the current local
+        // uploads still reproduce the declared image set. The final JSON and
+        // manifest remain independently valid even if a later draft differs.
+        $image_evidence = $this->fixed_image_evidence($post->ID, $version, $this->snapshot_post_body($post));
+        $assets_match = wp_json_encode(array_values($content['assets'] ?? array())) === wp_json_encode(array_values($image_evidence['assets']));
+
+        $file = $manifest['files'][0];
+        $created_at = sanitize_text_field($manifest['publishedAt'] ?? '');
+        if (false === strtotime($created_at)) {
+            $modified_time = filemtime($content_path);
+            $created_at = gmdate('c', false === $modified_time ? time() : $modified_time);
+        }
+        return array(
+            'version' => $version,
+            'format' => 'json',
+            'contentPath' => $this->relative_storage_path($content_path),
+            'contentUrl' => $content_url,
+            'manifestPath' => $this->relative_storage_path($manifest_path),
+            'manifestUrl' => $this->artifact_url($post->ID, $version, 'manifest', 'json'),
+            // Do not serve a replacement image as if it belonged to the
+            // fixed version. Missing mappings make the image check fail
+            // visibly, while preserving access to the signed text evidence.
+            'assetSources' => $assets_match ? $image_evidence['sources'] : array(),
+            'publicationMode' => 'recovered',
+            'editorialStatus' => 'published',
+            'publiclyReleased' => true,
+            'createdAt' => $created_at,
+            'releasedAt' => $created_at,
+            'registrationStatus' => 'completed',
+            'registrationResult' => array(
+                'documentHash' => strtolower((string) ($file['sha512'] ?? '')),
+                'registryAddress' => self::REGISTRY_ADDRESS,
+                'registryKey' => strtolower((string) ($file['registryKey'] ?? '')),
+                'transactionHash' => strtolower((string) ($file['transactionHash'] ?? '')),
+                'chainId' => self::CHAIN_ID,
+            ),
+            'manifestRegistrationStatus' => 'completed',
+        );
     }
 
     private function snapshot_post_body($post) {
@@ -1706,18 +2118,22 @@ JS;
     }
 
     private function canonical_json($post, $version, $content_url, $image_evidence) {
+        $source = array(
+            'postId' => (int) $post->ID,
+            'postType' => $post->post_type,
+            'pageUrl' => get_permalink($post),
+            'canonicalContentUrl' => $content_url,
+            'modifiedAt' => get_post_modified_time('c', true, $post),
+        );
+        $published_at = get_post_time('c', true, $post);
+        if ($published_at) {
+            $source['publishedAt'] = $published_at;
+        }
         return wp_json_encode(array(
             'schema' => 'digitalownership-wordpress-canonical-content-v2',
             'publication' => get_the_title($post),
             'version' => $version,
-            'source' => array(
-                'postId' => (int) $post->ID,
-                'postType' => $post->post_type,
-                'pageUrl' => get_permalink($post),
-                'canonicalContentUrl' => $content_url,
-                'publishedAt' => get_post_time('c', true, $post),
-                'modifiedAt' => get_post_modified_time('c', true, $post),
-            ),
+            'source' => $source,
             'content' => array(
                 'format' => 'html',
                 'body' => $image_evidence['body'],
@@ -1872,9 +2288,19 @@ JS;
         ), $base);
     }
 
-    private function linked_service_get($path, $token) {
+    private function linked_account_identity($token = '') {
+        $token = $token ? $token : get_option(self::OPTION_SITE_TOKEN, '');
+        if (!$token) {
+            return null;
+        }
+        $identity = $this->linked_service_get('/publication-identity', $token, 5);
+        $email = is_array($identity) ? strtolower(sanitize_email($identity['registrationEmail'] ?? '')) : '';
+        return is_email($email) ? $identity : null;
+    }
+
+    private function linked_service_get($path, $token, $timeout = 20) {
         $response = wp_remote_get(self::CREDIT_SERVICE_URL . $path, array(
-            'timeout' => 20,
+            'timeout' => absint($timeout) ?: 20,
             'headers' => array('Authorization' => 'Bearer ' . $token),
         ));
         if (is_wp_error($response) || 200 !== wp_remote_retrieve_response_code($response)) {
@@ -1992,9 +2418,19 @@ JS;
         }
 
         if ('prepublication' === ($record['publicationMode'] ?? '') && !$this->is_public_publication($post)) {
-            $published = wp_update_post(array('ID' => $post_id, 'post_status' => 'publish'), true);
+            $this->workflow_publish_in_progress = true;
+            try {
+                $published = wp_update_post(array('ID' => $post_id, 'post_status' => 'publish'), true);
+            } finally {
+                $this->workflow_publish_in_progress = false;
+            }
             if (is_wp_error($published)) {
                 $record['publicationError'] = sanitize_text_field($published->get_error_message());
+                return false;
+            }
+            $post = get_post($post_id);
+            if (!$this->is_public_publication($post)) {
+                $record['publicationError'] = __('WordPress did not publish the completed fixed version.', 'digitalownership-publication-verification');
                 return false;
             }
         }
@@ -2002,8 +2438,10 @@ JS;
         $record['publiclyReleased'] = true;
         $record['editorialStatus'] = 'published';
         $record['releasedAt'] = gmdate('c');
+        update_post_meta($post_id, self::META_ENABLED, '1');
         update_post_meta($post_id, self::META_VERSION, $version);
         delete_post_meta($post_id, self::META_CANDIDATE_VERSION);
+        delete_post_meta($post_id, self::META_REVISION_AUTHOR);
         return true;
     }
 

@@ -1,0 +1,12 @@
+{
+  "name": "digitalownership-publication-verification-development",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:wordpress": "bash tests/wordpress/run-evidence-save-regression.sh",
+    "test:browser": "bash tests/wordpress/run-evidence-save-regression.sh && node tests/wordpress/gutenberg-workflow-browser.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.58.0"
+  }
+}

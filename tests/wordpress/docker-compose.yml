@@ -1,0 +1,45 @@
+services:
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: wordpress
+      MARIADB_ROOT_PASSWORD: root
+    volumes:
+      - database:/var/lib/mysql
+
+  wordpress:
+    image: wordpress:7.1.3-php8.3-apache
+    depends_on:
+      - db
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+    ports:
+      - "8099:80"
+    volumes:
+      - wordpress:/var/www/html
+      - ../..:/var/www/html/wp-content/plugins/digitalownership-publication-verification:ro
+
+  cli:
+    image: wordpress:cli-php8.3
+    depends_on:
+      - db
+      - wordpress
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+    user: "33:33"
+    volumes:
+      - wordpress:/var/www/html
+      - ../..:/var/www/html/wp-content/plugins/digitalownership-publication-verification:ro
+    entrypoint: wp
+
+volumes:
+  database:
+  wordpress:

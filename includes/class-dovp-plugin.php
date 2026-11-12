@@ -59,7 +59,9 @@ final class DOVP_Plugin {
         add_action('admin_post_dovp_submit_editorial_review', array($this, 'submit_editorial_review'));
         add_action('admin_post_dovp_approve_editorial_review', array($this, 'approve_editorial_review'));
         add_action('admin_post_dovp_decline_editorial_review', array($this, 'decline_editorial_review'));
+        add_action('admin_post_dovp_return_content_review', array($this, 'return_content_review'));
         add_action('admin_post_dovp_connect_account', array($this, 'connect_account'));
+        add_action('admin_post_dovp_check_account_connection', array($this, 'check_account_connection'));
         add_action('admin_post_dovp_disconnect_account', array($this, 'disconnect_account'));
         add_action('admin_post_dovp_request_publication_approval', array($this, 'request_publication_approval'));
         add_action('admin_post_dovp_request_manifest_approval', array($this, 'request_manifest_approval'));
@@ -497,7 +499,7 @@ final class DOVP_Plugin {
             </p>
         <?php endif; ?>
         <?php if ($enabled) : ?>
-            <?php $this->render_registration_progress($candidate, $active_record, $candidate_changed); ?>
+            <?php $this->render_registration_progress($candidate, $active_record, $candidate_changed, $account_connection_ready); ?>
         <?php endif; ?>
         <?php if ($candidate || $revision_author_id) : ?>
             <p class="description"><strong><?php esc_html_e('WordPress autosave notice:', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('WordPress may show its standard autosave message while this private revision is open. It does not alter the registered public version or its evidence trail. Continue with the DigitalOwnership steps below.', 'digitalownership-publication-verification'); ?></p>
@@ -548,6 +550,9 @@ final class DOVP_Plugin {
             ?>
             <hr />
             <p><strong><?php esc_html_e('Private fixed version:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($candidate_version); ?></p>
+            <?php if (!$account_connection_ready) : ?>
+                <div class="notice notice-warning inline"><p><strong><?php esc_html_e('DigitalOwnership account connection is no longer active.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('This private workflow is paused. WordPress cannot check, create, or continue account registration requests until the site is connected again. Any displayed pending status may be out of date; this notice does not change completed registrations or publish this version.', 'digitalownership-publication-verification'); ?></p><?php if (current_user_can('manage_options')) : ?><p><a href="<?php echo esc_url($account_settings_url); ?>"><?php esc_html_e('Reconnect or remove the WordPress account connection', 'digitalownership-publication-verification'); ?></a></p><?php else : ?><p><?php esc_html_e('Ask a WordPress administrator to restore or remove the account connection.', 'digitalownership-publication-verification'); ?></p><?php endif; ?></div>
+            <?php endif; ?>
             <?php if (!$content_completed) : ?>
                 <p><a class="button button-secondary" href="<?php echo esc_url($preview_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Read exact fixed version', 'digitalownership-publication-verification'); ?></a> <a href="<?php echo esc_url($this->content_review_url($candidate)); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open exact JSON', 'digitalownership-publication-verification'); ?></a></p>
             <?php endif; ?>
@@ -586,6 +591,9 @@ final class DOVP_Plugin {
                 <h3><?php esc_html_e('Step 3: Administrator review', 'digitalownership-publication-verification'); ?></h3>
                 <?php if (current_user_can('manage_options')) : ?>
                     <p><?php esc_html_e('Review the rendered fixed version and its SHA-512 fingerprint. Approval sends this exact private version to the linked DigitalOwnership account holder for registration review.', 'digitalownership-publication-verification'); ?></p>
+                    <?php if (!empty($candidate['contentReviewOutcome'])) : ?>
+                        <div class="notice notice-warning inline"><p><?php esc_html_e('The previous account review was not completed. No blockchain registration was made and no credit was spent. Approve to request another account review for the same fixed file, or decline to return it to the original author.', 'digitalownership-publication-verification'); ?></p></div>
+                    <?php endif; ?>
                     <?php if (!empty($candidate['requestedRevisionNote'])) : ?><p><strong><?php esc_html_e('Proposed public revision note:', 'digitalownership-publication-verification'); ?></strong><br /><?php echo esc_html($candidate['requestedRevisionNote']); ?></p><?php endif; ?>
                     <?php if (!$account_connection_ready) : ?>
                         <div class="notice notice-warning inline"><p><?php esc_html_e('DigitalOwnership account connection is not confirmed. Complete or cancel the pending connection before approving this version for registration.', 'digitalownership-publication-verification'); ?></p><p><a href="<?php echo esc_url($account_settings_url); ?>"><?php esc_html_e('Open DigitalOwnership account connection settings', 'digitalownership-publication-verification'); ?></a></p></div>
@@ -596,16 +604,18 @@ final class DOVP_Plugin {
                 <?php endif; ?>
             <?php else : ?>
                 <h3><?php echo esc_html($content_completed ? __('Step 5: Register evidence file and publish', 'digitalownership-publication-verification') : __('Step 4: Register fixed content', 'digitalownership-publication-verification')); ?></h3>
-                <?php if (!$content_completed) : ?>
+                <?php if (!$account_connection_ready) : ?>
+                    <p><?php esc_html_e('Registration status is not being checked while the account connection is inactive.', 'digitalownership-publication-verification'); ?></p>
+                <?php elseif (!$content_completed) : ?>
                     <p><?php esc_html_e('The WordPress administrator approved this version. The DigitalOwnership account holder must now approve registration of this exact fixed file.', 'digitalownership-publication-verification'); ?></p>
                     <?php if (!empty($candidate['approvalUrl']) && 'pending' === ($candidate['approvalStatus'] ?? '')) : ?><p><a class="button button-primary" href="<?php echo esc_url($candidate['approvalUrl']); ?>" target="_blank" rel="noopener"><?php esc_html_e('Open account review of fixed version', 'digitalownership-publication-verification'); ?></a></p><?php endif; ?>
                     <?php if ($content_approval_terminal) : ?>
                         <div class="notice notice-warning inline"><p><?php esc_html_e('The account review expired or was declined. The fixed version and its SHA-512 have not changed.', 'digitalownership-publication-verification'); ?></p></div>
                         <?php if (current_user_can('manage_options')) : ?>
-                            <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_request_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_request_publication_approval_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Request a new account review', 'digitalownership-publication-verification'); ?></button></p>
-                            <p class="description"><?php esc_html_e('This creates a new review link for the same fixed file. It does not repeat administrator approval or spend a credit.', 'digitalownership-publication-verification'); ?></p>
+                            <p><button class="button button-primary" type="submit" form="dovp-action-form" formmethod="post" formnovalidate formaction="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_return_content_review&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_return_content_review_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Return to administrator review', 'digitalownership-publication-verification'); ?></button></p>
+                            <p class="description"><?php esc_html_e('No registration was made. The administrator can request another account review for this unchanged file or return it to the author.', 'digitalownership-publication-verification'); ?></p>
                         <?php else : ?>
-                            <p class="description"><?php esc_html_e('Ask a WordPress administrator to request a new account review for this unchanged fixed version.', 'digitalownership-publication-verification'); ?></p>
+                            <p class="description"><?php esc_html_e('Ask a WordPress administrator to return this unchanged fixed version to administrator review.', 'digitalownership-publication-verification'); ?></p>
                         <?php endif; ?>
                     <?php endif; ?>
                     <p><strong><?php esc_html_e('Registration status:', 'digitalownership-publication-verification'); ?></strong> <?php echo esc_html($candidate['registrationStatus'] ?? $candidate['approvalStatus'] ?? 'pending'); ?></p>
@@ -629,7 +639,9 @@ final class DOVP_Plugin {
                 <?php else : ?>
                     <p><?php esc_html_e('Both registrations are complete. WordPress is publishing this exact reviewed version now.', 'digitalownership-publication-verification'); ?></p>
                 <?php endif; ?>
-                <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_refresh_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_refresh_publication_approval_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Refresh registration and publication status', 'digitalownership-publication-verification'); ?></a></p>
+                <?php if ($account_connection_ready) : ?>
+                    <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dovp_refresh_publication_approval&post_id=' . $post->ID . '&version=' . rawurlencode($candidate_version)), 'dovp_refresh_publication_approval_' . $post->ID . '_' . $candidate_version)); ?>"><?php esc_html_e('Refresh registration and publication status', 'digitalownership-publication-verification'); ?></a></p>
+                <?php endif; ?>
             <?php endif; ?>
         <?php elseif ($active_record) : ?>
             <hr />
@@ -697,7 +709,7 @@ final class DOVP_Plugin {
         <?php
     }
 
-    private function render_registration_progress($candidate, $active_record, $candidate_changed) {
+    private function render_registration_progress($candidate, $active_record, $candidate_changed, $account_connection_ready = true) {
         $has_candidate = is_array($candidate);
         $editorial_status = $has_candidate ? sanitize_key($candidate['editorialStatus'] ?? 'draft') : '';
         $content_complete = $has_candidate && 'completed' === ($candidate['registrationStatus'] ?? '') && !empty($candidate['registrationResult']);
@@ -754,6 +766,16 @@ final class DOVP_Plugin {
                     'detail' => $manifest_complete ? __('WordPress is completing publication of this exact version.', 'digitalownership-publication-verification') : ($content_complete ? __('Waiting for the account holder to approve the evidence file.', 'digitalownership-publication-verification') : __('Available after fixed-content registration.', 'digitalownership-publication-verification')),
                 ),
             );
+        }
+        if ($has_candidate && !$account_connection_ready) {
+            foreach ($steps as &$step) {
+                if (__('Complete', 'digitalownership-publication-verification') === $step['status']) {
+                    continue;
+                }
+                $step['status'] = __('Paused', 'digitalownership-publication-verification');
+                $step['detail'] = __('The DigitalOwnership account connection must be restored before this workflow can continue.', 'digitalownership-publication-verification');
+            }
+            unset($step);
         }
         ?>
         <hr />
@@ -1224,6 +1246,7 @@ JS;
         $record['editorialStatus'] = 'approved';
         $record['editorialDecidedAt'] = gmdate('c');
         $record['editorialDecidedBy'] = get_current_user_id();
+        unset($record['contentReviewOutcome'], $record['contentReviewOutcomeAt']);
         if (!$this->create_content_approval($post_id, $stored_version, $record, $token)) {
             $this->redirect_with_notice($post_id, 'approval-failed');
         }
@@ -1260,6 +1283,23 @@ JS;
         $this->redirect_with_notice($post_id, 'editorial-declined');
     }
 
+    public function return_content_review() {
+        $post_id = isset($_REQUEST['post_id']) ? absint($_REQUEST['post_id']) : 0;
+        $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
+        if (!$post_id || !current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot return this publication to administrator review.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_return_content_review_' . $post_id . '_' . $version);
+        list($stored_version, $record) = $this->record_for_version($post_id, $version);
+        if (!$this->return_terminal_content_review_to_administrator($record)) {
+            $this->redirect_with_notice($post_id, 'approval-unavailable');
+        }
+        $records = $this->publication_records($post_id);
+        $records[$stored_version] = $record;
+        update_post_meta($post_id, self::META_VERSIONS, $records);
+        $this->redirect_with_notice($post_id, 'account-review-returned');
+    }
+
     public function add_admin_pages() {
         add_options_page(
             __('DigitalOwnership Publication Verification', 'digitalownership-publication-verification'),
@@ -1281,12 +1321,14 @@ JS;
             'editorial-review-requested' => array('success', __('Administrator review requested. A WordPress administrator can now approve or decline this exact private version.', 'digitalownership-publication-verification')),
             'editorial-approved' => array('success', __('Administrator approval recorded. The DigitalOwnership account holder can now review and approve registration of the exact fixed version.', 'digitalownership-publication-verification')),
             'editorial-declined' => array('warning', __('Administrator review declined. Nothing was registered or published. Only the original author can update the draft and submit a new fixed version.', 'digitalownership-publication-verification')),
+            'account-review-returned' => array('warning', __('The fixed-content account review was not completed. No blockchain registration was made and no credit was spent. An administrator can now request another review or return the version to its author.', 'digitalownership-publication-verification')),
             'candidate-outdated' => array('warning', __('The saved post no longer matches the private fixed version. Create a new fixed version before submitting or approving it.', 'digitalownership-publication-verification')),
             'approval-requested' => array('success', __('Review request sent. The DigitalOwnership account holder can read the fixed publication version and approve or decline its exact fingerprint. Return here afterwards to refresh the status.', 'digitalownership-publication-verification')),
             'approval-refreshed' => array('success', __('Approval status refreshed.', 'digitalownership-publication-verification')),
             'manifest-prepared' => array('success', __('Public manifest draft created. Review the public email and SHA-512 in the evidence box, then request a separate account approval.', 'digitalownership-publication-verification')),
             'manifest-approval-requested' => array('success', __('Public evidence file review requested. The DigitalOwnership account holder can approve or decline its exact fingerprint. Return here afterwards to refresh the status.', 'digitalownership-publication-verification')),
             'manifest-published' => array('success', __('Both registrations completed. This exact approved version is now public with its verification link.', 'digitalownership-publication-verification')),
+            'account-connected' => array('success', __('DigitalOwnership account connection confirmed. This WordPress site can now request account-reviewed registrations.', 'digitalownership-publication-verification')),
             'approval-unavailable' => array('error', __('The WordPress site is not connected, or this fixed version is unavailable.', 'digitalownership-publication-verification')),
             'account-connection-pending' => array('error', __('DigitalOwnership account connection is not complete. Open Settings > DigitalOwnership Verification to complete or cancel the pending connection before continuing.', 'digitalownership-publication-verification')),
             'approval-failed' => array('error', __('DigitalOwnership could not create the approval request. Check the linked account, available credits, and service status.', 'digitalownership-publication-verification')),
@@ -1334,6 +1376,12 @@ JS;
             <?php elseif ($site_token) : ?>
                 <div class="notice notice-warning inline"><p><strong><?php esc_html_e('Account connection not confirmed.', 'digitalownership-publication-verification'); ?></strong> <?php esc_html_e('This WordPress installation has a pending local connection request, but no DigitalOwnership account has approved it yet. It cannot request registrations or spend credits.', 'digitalownership-publication-verification'); ?></p></div>
                 <p><a class="button button-primary" href="<?php echo esc_url($account_url); ?>" target="_blank" rel="noopener"><?php esc_html_e('Complete DigitalOwnership account connection', 'digitalownership-publication-verification'); ?></a></p>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                    <?php wp_nonce_field('dovp_check_account_connection'); ?>
+                    <input type="hidden" name="action" value="dovp_check_account_connection" />
+                    <p><button class="button button-secondary" type="submit"><?php esc_html_e('Check account connection now', 'digitalownership-publication-verification'); ?></button></p>
+                    <p class="description"><?php esc_html_e('After the account holder approves the connection in DigitalOwnership, return to this page and select this button. WordPress will confirm whether the site is connected.', 'digitalownership-publication-verification'); ?></p>
+                </form>
                 <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                     <?php wp_nonce_field('dovp_disconnect_account'); ?>
                     <input type="hidden" name="action" value="dovp_disconnect_account" />
@@ -1386,6 +1434,19 @@ JS;
         check_admin_referer('dovp_disconnect_account');
         delete_option(self::OPTION_SITE_TOKEN);
         wp_safe_redirect(add_query_arg(array('page' => 'dovp-settings', 'dovp_notice' => 'account-disconnected'), admin_url('options-general.php')));
+        exit;
+    }
+
+    public function check_account_connection() {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You cannot check this WordPress account connection.', 'digitalownership-publication-verification'), 403);
+        }
+        check_admin_referer('dovp_check_account_connection');
+        $token = get_option(self::OPTION_SITE_TOKEN, '');
+        $notice = $token && $this->linked_account_identity($token)
+            ? 'account-connected'
+            : 'account-connection-pending';
+        wp_safe_redirect(add_query_arg(array('page' => 'dovp-settings', 'dovp_notice' => $notice), admin_url('options-general.php')));
         exit;
     }
 
@@ -1442,6 +1503,9 @@ JS;
         $version = isset($_REQUEST['version']) ? sanitize_key(wp_unslash($_REQUEST['version'])) : '';
         if (!$post_id || !current_user_can('edit_post', $post_id)) wp_die(esc_html__('You cannot check publication approval.', 'digitalownership-publication-verification'), 403);
         check_admin_referer('dovp_refresh_publication_approval_' . $post_id . '_' . $version);
+        if (!$this->linked_account_identity()) {
+            $this->redirect_with_notice($post_id, 'account-connection-pending');
+        }
         $this->process_publication_workflow($post_id, $version);
         list($stored_version, $record) = $this->record_for_version($post_id, $version);
         $this->redirect_with_notice($post_id, $this->record_is_publicly_released($record) && !empty($record['manifestUrl']) ? 'manifest-published' : 'approval-refreshed');
@@ -1488,6 +1552,7 @@ JS;
 
         $this->ensure_manifest_draft_token($record);
         $this->refresh_approval_and_registration($token, $post_id, $record, 'content');
+        $this->return_terminal_content_review_to_administrator($record);
         $ready_to_release = $post
             && $this->is_candidate_record($record)
             && 'approved' === ($record['editorialStatus'] ?? '')
@@ -1519,6 +1584,23 @@ JS;
         if ($ready_to_release && ($content_open || $manifest_open)) {
             $this->schedule_publication_workflow($post_id, $stored_version, 30);
         }
+    }
+
+    private function return_terminal_content_review_to_administrator(&$record) {
+        if (!is_array($record)
+            || 'approved' !== ($record['editorialStatus'] ?? '')
+            || ('completed' === ($record['registrationStatus'] ?? '') && !empty($record['registrationResult']))) {
+            return false;
+        }
+        $outcome = sanitize_key($record['approvalStatus'] ?? '');
+        if (!in_array($outcome, array('expired', 'rejected'), true)) {
+            return false;
+        }
+        $record['editorialStatus'] = 'pending';
+        $record['contentReviewOutcome'] = $outcome;
+        $record['contentReviewOutcomeAt'] = gmdate('c');
+        unset($record['approvalId'], $record['approvalUrl'], $record['approvalStatus'], $record['approvalAttempt'], $record['registrationId'], $record['registrationStatus'], $record['registrationError'], $record['registrationResult']);
+        return true;
     }
 
     private function refresh_approval_and_registration($token, $post_id, &$record, $kind) {

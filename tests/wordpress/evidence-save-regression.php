@@ -365,6 +365,8 @@ $plugin->render_settings_page();
 $pending_connection_html = (string) ob_get_clean();
 dovp_test_assert(false !== strpos($pending_connection_html, 'Account connection not confirmed'), 'Pending local token was not identified as an incomplete connection.');
 dovp_test_assert(false !== strpos($pending_connection_html, 'Complete DigitalOwnership account connection'), 'Pending local token did not provide a completion action.');
+dovp_test_assert(false !== strpos($pending_connection_html, 'Check account connection now'), 'Pending local token did not provide a deliberate connection-status check.');
+dovp_test_assert(false !== strpos($pending_connection_html, 'After the account holder approves the connection in DigitalOwnership'), 'Connection-status check did not explain when to use it.');
 dovp_test_assert(false === strpos($pending_connection_html, 'installation is connected to a DigitalOwnership account'), 'Pending local token was presented as a connected account.');
 
 $connection_post_id = wp_insert_post(array(
@@ -393,6 +395,8 @@ $plugin->render_meta_box($connection_post);
 $pending_review_html = (string) ob_get_clean();
 dovp_test_assert(false !== strpos($pending_review_html, 'Complete or cancel the pending connection before approving this version for registration.'), 'Administrator review did not explain the incomplete account connection.');
 dovp_test_assert(false === strpos($pending_review_html, 'Approve and request DigitalOwnership registration'), 'Administrator could approve registration with an unconfirmed account connection.');
+dovp_test_assert(false !== strpos($pending_review_html, 'DigitalOwnership account connection is no longer active.'), 'A revoked account connection did not pause the private workflow clearly.');
+dovp_test_assert(false !== strpos($pending_review_html, 'Paused'), 'Registration progress did not show that the disconnected workflow is paused.');
 
 $dovp_test_connection_state = 'linked';
 ob_start();
@@ -403,6 +407,60 @@ ob_start();
 $plugin->render_meta_box($connection_post);
 $linked_review_html = (string) ob_get_clean();
 dovp_test_assert(false !== strpos($linked_review_html, 'Approve and request DigitalOwnership registration'), 'Confirmed account connection did not allow administrator approval.');
+
+// A device can be removed from the DigitalOwnership account after WordPress
+// created a review request. Do not leave a stale account-review button or a
+// misleading refresh action visible in that state.
+update_post_meta($connection_post_id, '_dovp_versions', array($connection_version => array(
+    'version' => $connection_version,
+    'publicationMode' => 'prepublication',
+    'editorialStatus' => 'approved',
+    'publiclyReleased' => false,
+    'revisionAuthorId' => $author_id,
+    'sourceRevisionHash' => hash('sha256', wp_json_encode(array(
+        'title' => $connection_post->post_title,
+        'content' => $connection_post->post_content,
+    ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)),
+    'approvalStatus' => 'pending',
+    'approvalUrl' => 'https://digitalownership.example.test/account?pipelineApproval=stale-approval',
+)));
+$dovp_test_connection_state = 'pending';
+ob_start();
+$plugin->render_meta_box($connection_post);
+$stale_approval_html = (string) ob_get_clean();
+dovp_test_assert(false !== strpos($stale_approval_html, 'Registration status is not being checked while the account connection is inactive.'), 'A stale approval did not explain that its status cannot be checked after account disconnection.');
+dovp_test_assert(false === strpos($stale_approval_html, 'Open account review of fixed version'), 'A stale account-review link remained visible after account disconnection.');
+dovp_test_assert(false === strpos($stale_approval_html, 'Refresh registration and publication status'), 'A misleading refresh action remained visible after account disconnection.');
+
+// An expired or rejected fixed-content account review has not registered the
+// content. It must return to administrator review rather than lock the draft.
+$terminal_content_record = array(
+    'editorialStatus' => 'approved',
+    'approvalStatus' => 'rejected',
+    'registrationStatus' => 'pending',
+    'registrationResult' => array(),
+);
+$return_review_method = new ReflectionMethod(DOVP_Plugin::class, 'return_terminal_content_review_to_administrator');
+$return_review_method->setAccessible(true);
+$return_review_arguments = array(&$terminal_content_record);
+$returned_to_administrator = $return_review_method->invokeArgs($plugin, $return_review_arguments);
+dovp_test_assert(true === $returned_to_administrator, 'A rejected fixed-content account review was not returned to administrator review.');
+dovp_test_assert('pending' === $terminal_content_record['editorialStatus'], 'Returned fixed-content review did not wait for administrator review.');
+dovp_test_assert('rejected' === $terminal_content_record['contentReviewOutcome'], 'Returned fixed-content review did not retain its account-review outcome.');
+dovp_test_assert(empty($terminal_content_record['approvalId']) && empty($terminal_content_record['registrationResult']), 'Returned fixed-content review retained an obsolete registration request.');
+
+// A rejected evidence-file review occurs after fixed content registration.
+// It must remain in Step 5, so the same manifest can be reviewed again.
+$terminal_manifest_record = array(
+    'editorialStatus' => 'approved',
+    'approvalStatus' => 'completed',
+    'registrationStatus' => 'completed',
+    'registrationResult' => array('registryKey' => '0xexample'),
+    'manifestApprovalStatus' => 'rejected',
+);
+$manifest_returned = $return_review_method->invokeArgs($plugin, array(&$terminal_manifest_record));
+dovp_test_assert(false === $manifest_returned, 'A rejected evidence-file review incorrectly returned the already registered fixed content to administrator review.');
+dovp_test_assert('approved' === $terminal_manifest_record['editorialStatus'], 'A rejected evidence-file review changed the completed fixed-content workflow state.');
 delete_option('dovp_site_device_token');
 
 echo "PASS: editor saves, administrator reviews, account-link state, publication releases, withdrawal archiving, and metadata recovery preserved evidence.\n";

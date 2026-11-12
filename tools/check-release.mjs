@@ -158,8 +158,8 @@ if (!implementation.includes("Fixed-content SHA-512:") || !implementation.includ
 if (!implementation.includes("Evidence-file SHA-512:") || !implementation.includes("manifestDraftSha512")) {
   fail("the evidence-file review step must show the distinct manifest SHA-512");
 }
-if (!implementation.includes("Request a new account review") || !implementation.includes("dovp_request_publication_approval")) {
-  fail("an administrator must be able to replace an expired fixed-content account review");
+if (!implementation.includes("Return to administrator review") || !implementation.includes("dovp_return_content_review") || !implementation.includes("return_terminal_content_review_to_administrator")) {
+  fail("an expired fixed-content account review must return safely to administrator review before another request is made");
 }
 if (!implementation.includes("Request a new evidence-file review") || !implementation.includes("dovp_request_manifest_approval") || !implementation.includes("manifestApprovalAttempt")) {
   fail("an administrator must be able to replace an expired evidence-file account review");
